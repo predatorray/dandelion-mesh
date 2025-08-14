@@ -54,7 +54,7 @@
     "node": ">=10"
   },
   "devDependencies": {
-    "@ava/typescript": "^1.1.1",
+    "@ava/typescript": "^6.0.0",
     "@istanbuljs/nyc-config-typescript": "^1.0.1",
     "@typescript-eslint/eslint-plugin": "^4.0.1",
     "@typescript-eslint/parser": "^4.0.1",
@@ -89,6 +89,7 @@
     "failFast": true,
     "timeout": "60s",
     "typescript": {
+      "compile": false,
       "rewritePaths": {
         "src/": "build/main/"
       }
