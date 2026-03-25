@@ -65,7 +65,8 @@ export class RaftNode<T = unknown> {
   private readonly log: RaftLog<T>;
 
   /** Called by the node to send an RPC to a peer — must be wired up externally */
-  public sendMessage: (toPeerId: string, message: RaftMessage<T>) => void = () => {};
+  public sendMessage: (toPeerId: string, message: RaftMessage<T>) => void =
+    () => {};
 
   private readonly eventListeners: EventListenerMap<T> = {
     leaderChanged: new Set(),
@@ -183,12 +184,18 @@ export class RaftNode<T = unknown> {
   }
 
   /** Register an event listener */
-  on<E extends keyof RaftNodeEvents<T>>(event: E, listener: RaftNodeEvents<T>[E]): void {
+  on<E extends keyof RaftNodeEvents<T>>(
+    event: E,
+    listener: RaftNodeEvents<T>[E]
+  ): void {
     (this.eventListeners[event] as Set<RaftNodeEvents<T>[E]>).add(listener);
   }
 
   /** Remove an event listener */
-  off<E extends keyof RaftNodeEvents<T>>(event: E, listener: RaftNodeEvents<T>[E]): void {
+  off<E extends keyof RaftNodeEvents<T>>(
+    event: E,
+    listener: RaftNodeEvents<T>[E]
+  ): void {
     (this.eventListeners[event] as Set<RaftNodeEvents<T>[E]>).delete(listener);
   }
 
@@ -287,8 +294,12 @@ export class RaftNode<T = unknown> {
     }
 
     // Grant vote if we haven't voted for someone else, and candidate's log is up-to-date
-    const canVote = this.votedFor === null || this.votedFor === args.candidateId;
-    const candidateLogUpToDate = this.isLogUpToDate(args.lastLogTerm, args.lastLogIndex);
+    const canVote =
+      this.votedFor === null || this.votedFor === args.candidateId;
+    const candidateLogUpToDate = this.isLogUpToDate(
+      args.lastLogTerm,
+      args.lastLogIndex
+    );
 
     if (canVote && candidateLogUpToDate) {
       this.votedFor = args.candidateId;
@@ -300,7 +311,10 @@ export class RaftNode<T = unknown> {
     this.sendMessage(args.candidateId, reply);
   }
 
-  private handleRequestVoteResult(fromPeerId: string, result: RequestVoteResult): void {
+  private handleRequestVoteResult(
+    fromPeerId: string,
+    result: RequestVoteResult
+  ): void {
     if (this.role !== 'candidate') return;
     if (result.term !== this.currentTerm) return;
 
@@ -316,7 +330,10 @@ export class RaftNode<T = unknown> {
   }
 
   /** Check if a candidate's log is at least as up-to-date as ours */
-  private isLogUpToDate(candidateLastTerm: number, candidateLastIndex: number): boolean {
+  private isLogUpToDate(
+    candidateLastTerm: number,
+    candidateLastIndex: number
+  ): boolean {
     const myLastTerm = this.log.lastTerm();
     if (candidateLastTerm !== myLastTerm) {
       return candidateLastTerm > myLastTerm;
@@ -326,7 +343,10 @@ export class RaftNode<T = unknown> {
 
   // --- AppendEntries handling ---
 
-  private handleAppendEntries(_fromPeerId: string, args: AppendEntriesArgs<T>): void {
+  private handleAppendEntries(
+    _fromPeerId: string,
+    args: AppendEntriesArgs<T>
+  ): void {
     const reply: AppendEntriesResult = {
       type: 'AppendEntriesResult',
       term: this.currentTerm,
@@ -429,14 +449,12 @@ export class RaftNode<T = unknown> {
   }
 
   private sendAppendEntriesTo(peer: string): void {
-    const ni = this.nextIndex.get(peer) ?? (this.log.lastIndex() + 1);
+    const ni = this.nextIndex.get(peer) ?? this.log.lastIndex() + 1;
     const prevLogIndex = ni - 1;
     const prevLogTerm = this.log.getTerm(prevLogIndex);
     const lastIndex = this.log.lastIndex();
 
-    const entries = ni <= lastIndex
-      ? this.log.getEntries(ni, lastIndex)
-      : [];
+    const entries = ni <= lastIndex ? this.log.getEntries(ni, lastIndex) : [];
 
     const args: AppendEntriesArgs<T> = {
       type: 'AppendEntries',
@@ -489,7 +507,8 @@ export class RaftNode<T = unknown> {
 
   private resetElectionTimer(): void {
     this.clearElectionTimer();
-    const timeout = this.electionTimeoutMin +
+    const timeout =
+      this.electionTimeoutMin +
       Math.random() * (this.electionTimeoutMax - this.electionTimeoutMin);
     this.electionTimer = setTimeout(() => {
       if (!this.destroyed) {

@@ -1,4 +1,4 @@
-# Dandelion Mesh
+# <img src="https://github.com/predatorray/dandelion-mesh/blob/assets/Dandelion_40x40.png?raw=true" alt="Description of image" width="40" height="40"> Dandelion Mesh
 
 Serverless mesh network for browsers using WebRTC. Connect, broadcast, and sync state without a central server.
 

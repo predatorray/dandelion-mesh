@@ -27,7 +27,9 @@ export interface EncryptedPayload {
 }
 
 /** Generate an RSA-OAEP key pair and export the public key as JWK */
-export async function generateKeyBundle(modulusLength = 4096): Promise<CryptoKeyBundle> {
+export async function generateKeyBundle(
+  modulusLength = 4096
+): Promise<CryptoKeyBundle> {
   const keyPair = await crypto.subtle.generateKey(
     {
       name: 'RSA-OAEP',
@@ -36,7 +38,7 @@ export async function generateKeyBundle(modulusLength = 4096): Promise<CryptoKey
       hash: RSA_HASH,
     },
     true,
-    ['encrypt', 'decrypt'],
+    ['encrypt', 'decrypt']
   );
   const publicKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
   return {
@@ -53,17 +55,20 @@ export async function importPublicKey(jwk: JsonWebKey): Promise<CryptoKey> {
     jwk,
     { name: 'RSA-OAEP', hash: RSA_HASH },
     false,
-    ['encrypt'],
+    ['encrypt']
   );
 }
 
 /** Encrypt arbitrary data with a recipient's RSA public key (hybrid encryption) */
-export async function encrypt(plaintext: Uint8Array, recipientPublicKey: CryptoKey): Promise<EncryptedPayload> {
+export async function encrypt(
+  plaintext: Uint8Array,
+  recipientPublicKey: CryptoKey
+): Promise<EncryptedPayload> {
   // Generate random AES key
   const aesKey = await crypto.subtle.generateKey(
     { name: 'AES-GCM', length: AES_KEY_LENGTH },
     true,
-    ['encrypt'],
+    ['encrypt']
   );
 
   // Encrypt the AES key with RSA
@@ -71,7 +76,7 @@ export async function encrypt(plaintext: Uint8Array, recipientPublicKey: CryptoK
   const encryptedAesKey = await crypto.subtle.encrypt(
     { name: 'RSA-OAEP' },
     recipientPublicKey,
-    rawAesKey,
+    rawAesKey
   );
 
   // Encrypt the plaintext with AES-GCM
@@ -79,7 +84,7 @@ export async function encrypt(plaintext: Uint8Array, recipientPublicKey: CryptoK
   const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     aesKey,
-    plaintext,
+    plaintext
   );
 
   return {
@@ -90,12 +95,15 @@ export async function encrypt(plaintext: Uint8Array, recipientPublicKey: CryptoK
 }
 
 /** Decrypt a hybrid-encrypted payload with the recipient's RSA private key */
-export async function decrypt(payload: EncryptedPayload, privateKey: CryptoKey): Promise<Uint8Array> {
+export async function decrypt(
+  payload: EncryptedPayload,
+  privateKey: CryptoKey
+): Promise<Uint8Array> {
   // Decrypt the AES key with RSA
   const rawAesKey = await crypto.subtle.decrypt(
     { name: 'RSA-OAEP' },
     privateKey,
-    hexToArrayBuffer(payload.encryptedKey),
+    hexToArrayBuffer(payload.encryptedKey)
   );
 
   const aesKey = await crypto.subtle.importKey(
@@ -103,7 +111,7 @@ export async function decrypt(payload: EncryptedPayload, privateKey: CryptoKey):
     rawAesKey,
     { name: 'AES-GCM', length: AES_KEY_LENGTH },
     false,
-    ['decrypt'],
+    ['decrypt']
   );
 
   // Decrypt the ciphertext with AES-GCM
@@ -111,7 +119,7 @@ export async function decrypt(payload: EncryptedPayload, privateKey: CryptoKey):
   const plaintext = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv },
     aesKey,
-    hexToArrayBuffer(payload.ciphertext),
+    hexToArrayBuffer(payload.ciphertext)
   );
 
   return new Uint8Array(plaintext);

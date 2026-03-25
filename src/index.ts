@@ -1,6 +1,13 @@
 // Transport layer
-export { Transport, TransportEvents, TransportEventName } from './transport/Transport';
-export { PeerJSTransport, PeerJSTransportOptions } from './transport/PeerJSTransport';
+export {
+  Transport,
+  TransportEvents,
+  TransportEventName,
+} from './transport/Transport';
+export {
+  PeerJSTransport,
+  PeerJSTransportOptions,
+} from './transport/PeerJSTransport';
 
 // Crypto
 export {

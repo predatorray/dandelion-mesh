@@ -38,10 +38,16 @@ export interface Transport {
   broadcast(data: unknown): Promise<void>;
 
   /** Register an event listener */
-  on<E extends TransportEventName>(event: E, listener: TransportEvents[E]): void;
+  on<E extends TransportEventName>(
+    event: E,
+    listener: TransportEvents[E]
+  ): void;
 
   /** Remove an event listener */
-  off<E extends TransportEventName>(event: E, listener: TransportEvents[E]): void;
+  off<E extends TransportEventName>(
+    event: E,
+    listener: TransportEvents[E]
+  ): void;
 
   /** Shut down the transport and close all connections */
   close(): void;

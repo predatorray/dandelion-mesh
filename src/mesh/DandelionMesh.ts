@@ -84,7 +84,9 @@ export class DandelionMesh<T = unknown> {
     this.transport = transport;
     this.modulusLength = options?.modulusLength ?? 4096;
     this.raftOptions = options?.raft ?? {};
-    this.raftLog = (options?.raftLog as RaftLog<MeshLogCommand<T>>) ?? new InMemoryRaftLog<MeshLogCommand<T>>();
+    this.raftLog =
+      (options?.raftLog as RaftLog<MeshLogCommand<T>>) ??
+      new InMemoryRaftLog<MeshLogCommand<T>>();
     this.bootstrapPeers = options?.bootstrapPeers ?? [];
 
     // Start key generation immediately
@@ -179,12 +181,18 @@ export class DandelionMesh<T = unknown> {
   }
 
   /** Register an event listener */
-  on<E extends keyof DandelionMeshEvents<T>>(event: E, listener: DandelionMeshEvents<T>[E]): void {
+  on<E extends keyof DandelionMeshEvents<T>>(
+    event: E,
+    listener: DandelionMeshEvents<T>[E]
+  ): void {
     (this.listeners[event] as Set<DandelionMeshEvents<T>[E]>).add(listener);
   }
 
   /** Remove an event listener */
-  off<E extends keyof DandelionMeshEvents<T>>(event: E, listener: DandelionMeshEvents<T>[E]): void {
+  off<E extends keyof DandelionMeshEvents<T>>(
+    event: E,
+    listener: DandelionMeshEvents<T>[E]
+  ): void {
     (this.listeners[event] as Set<DandelionMeshEvents<T>[E]>).delete(listener);
   }
 
@@ -212,11 +220,17 @@ export class DandelionMesh<T = unknown> {
     }
 
     // Initialize Raft node
-    this.raftNode = new RaftNode<MeshLogCommand<T>>(peerId, this.raftLog, this.raftOptions);
+    this.raftNode = new RaftNode<MeshLogCommand<T>>(
+      peerId,
+      this.raftLog,
+      this.raftOptions
+    );
     this.raftNode.sendMessage = (toPeerId, message) => {
-      this.transport.send(toPeerId, this.wireMessage('raft', message)).catch(() => {
-        // Peer may have disconnected; non-fatal
-      });
+      this.transport
+        .send(toPeerId, this.wireMessage('raft', message))
+        .catch(() => {
+          // Peer may have disconnected; non-fatal
+        });
     };
     this.raftNode.on('committed', this.onRaftCommitted);
     this.raftNode.on('leaderChanged', (leaderId) => {
@@ -251,7 +265,10 @@ export class DandelionMesh<T = unknown> {
     if (!wire || !wire.channel) return;
 
     if (wire.channel === 'raft') {
-      this.raftNode?.handleMessage(fromPeerId, wire.payload as RaftMessage<MeshLogCommand<T>>);
+      this.raftNode?.handleMessage(
+        fromPeerId,
+        wire.payload as RaftMessage<MeshLogCommand<T>>
+      );
     } else if (wire.channel === 'control') {
       this.handleControlMessage(wire.payload as MeshControlMessage<T>);
     }
@@ -282,15 +299,22 @@ export class DandelionMesh<T = unknown> {
 
   // --- Raft commit handler ---
 
-  private onRaftCommitted = (entry: LogEntry<MeshLogCommand<T>>, _index: number): void => {
+  private onRaftCommitted = (
+    entry: LogEntry<MeshLogCommand<T>>,
+    _index: number
+  ): void => {
     const cmd = entry.command;
     switch (cmd._meshType) {
       case 'public':
-        this.emit('message', {
-          type: 'public',
-          sender: cmd.sender,
-          data: cmd.data,
-        } as MeshMessage<T>, false);
+        this.emit(
+          'message',
+          {
+            type: 'public',
+            sender: cmd.sender,
+            data: cmd.data,
+          } as MeshMessage<T>,
+          false
+        );
         break;
 
       case 'encrypted':
@@ -299,7 +323,9 @@ export class DandelionMesh<T = unknown> {
     }
   };
 
-  private async handleEncryptedCommit(cmd: EncryptedPrivateMessage): Promise<void> {
+  private async handleEncryptedCommit(
+    cmd: EncryptedPrivateMessage
+  ): Promise<void> {
     if (!this.localPeerId) return;
 
     // Only the intended recipient decrypts
@@ -309,14 +335,21 @@ export class DandelionMesh<T = unknown> {
       await this.cryptoReady;
     }
     try {
-      const plaintext = await decrypt(cmd.payload, this.cryptoBundle!.privateKey);
+      const plaintext = await decrypt(
+        cmd.payload,
+        this.cryptoBundle!.privateKey
+      );
       const data = JSON.parse(new TextDecoder().decode(plaintext)) as T;
-      this.emit('message', {
-        type: 'private',
-        sender: cmd.sender,
-        recipient: cmd.recipient,
-        data,
-      } as MeshMessage<T>, false);
+      this.emit(
+        'message',
+        {
+          type: 'private',
+          sender: cmd.sender,
+          recipient: cmd.recipient,
+          data,
+        } as MeshMessage<T>,
+        false
+      );
     } catch (err) {
       // Not for us or decryption failed — this is expected for other recipients
     }
@@ -335,7 +368,9 @@ export class DandelionMesh<T = unknown> {
       peerId: this.localPeerId,
       jwk: this.cryptoBundle.publicKeyJwk,
     };
-    this.transport.broadcast(this.wireMessage('control', announcement)).catch(() => {});
+    this.transport
+      .broadcast(this.wireMessage('control', announcement))
+      .catch(() => {});
   }
 
   private async sendPublicKeyTo(remotePeerId: string): Promise<void> {
@@ -349,7 +384,9 @@ export class DandelionMesh<T = unknown> {
       peerId: this.localPeerId,
       jwk: this.cryptoBundle.publicKeyJwk,
     };
-    this.transport.send(remotePeerId, this.wireMessage('control', announcement)).catch(() => {});
+    this.transport
+      .send(remotePeerId, this.wireMessage('control', announcement))
+      .catch(() => {});
   }
 
   private getOrAwaitPublicKey(peerId: string): Promise<CryptoKey> | undefined {
@@ -358,7 +395,10 @@ export class DandelionMesh<T = unknown> {
 
   // --- Helpers ---
 
-  private wireMessage(channel: 'raft' | 'control', payload: unknown): WireMessage {
+  private wireMessage(
+    channel: 'raft' | 'control',
+    payload: unknown
+  ): WireMessage {
     return { channel, payload };
   }
 
@@ -367,7 +407,9 @@ export class DandelionMesh<T = unknown> {
     ...args: Parameters<DandelionMeshEvents<T>[E]>
   ): void {
     for (const listener of this.listeners[event]) {
-      (listener as (...a: Parameters<DandelionMeshEvents<T>[E]>) => void)(...args);
+      (listener as (...a: Parameters<DandelionMeshEvents<T>[E]>) => void)(
+        ...args
+      );
     }
   }
 }

@@ -64,7 +64,10 @@ export class PeerJSTransport implements Transport {
   }
 
   connect(remotePeerId: string): void {
-    if (this.connections.has(remotePeerId) || this.pendingConnections.has(remotePeerId)) {
+    if (
+      this.connections.has(remotePeerId) ||
+      this.pendingConnections.has(remotePeerId)
+    ) {
       return;
     }
     const conn = this.peer.connect(remotePeerId, CONNECT_OPTIONS);
@@ -87,11 +90,17 @@ export class PeerJSTransport implements Transport {
     await Promise.all(promises);
   }
 
-  on<E extends TransportEventName>(event: E, listener: TransportEvents[E]): void {
+  on<E extends TransportEventName>(
+    event: E,
+    listener: TransportEvents[E]
+  ): void {
     (this.listeners[event] as Set<TransportEvents[E]>).add(listener);
   }
 
-  off<E extends TransportEventName>(event: E, listener: TransportEvents[E]): void {
+  off<E extends TransportEventName>(
+    event: E,
+    listener: TransportEvents[E]
+  ): void {
     (this.listeners[event] as Set<TransportEvents[E]>).delete(listener);
   }
 
@@ -144,7 +153,10 @@ export class PeerJSTransport implements Transport {
     });
   }
 
-  private emit<E extends TransportEventName>(event: E, ...args: Parameters<TransportEvents[E]>): void {
+  private emit<E extends TransportEventName>(
+    event: E,
+    ...args: Parameters<TransportEvents[E]>
+  ): void {
     for (const listener of this.listeners[event]) {
       (listener as (...a: Parameters<TransportEvents[E]>) => void)(...args);
     }

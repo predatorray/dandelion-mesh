@@ -28,6 +28,7 @@
     "sort-imports": [
       "error",
       { "ignoreDeclarationSort": true, "ignoreCase": true }
-    ]
+    ],
+    "@typescript-eslint/no-empty-function": ["error", { "allow": ["arrowFunctions"] }]
   }
 }
