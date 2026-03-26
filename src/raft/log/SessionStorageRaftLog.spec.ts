@@ -23,7 +23,7 @@
 
 import test from 'ava';
 
-import { LocalStorageRaftLog } from './LocalStorageRaftLog';
+import { SessionStorageRaftLog } from './SessionStorageRaftLog';
 import { runStorageRaftLogTests } from './StorageRaftLog.test-util';
 
 // Simple Storage mock
@@ -56,9 +56,9 @@ class StorageMock implements Storage {
 }
 
 test.before(() => {
-  (globalThis as any).localStorage = new StorageMock();
+  (globalThis as any).sessionStorage = new StorageMock();
 });
 
-test('LocalStorageRaftLog', (t) => {
-  runStorageRaftLogTests(t, (ns) => new LocalStorageRaftLog<string>(ns));
+test('SessionStorageRaftLog', (t) => {
+  runStorageRaftLogTests(t, (ns) => new SessionStorageRaftLog<string>(ns));
 });

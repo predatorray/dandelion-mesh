@@ -35,6 +35,7 @@ export {
 export { RaftLog } from './raft/log/RaftLog';
 export { InMemoryRaftLog } from './raft/log/InMemoryRaftLog';
 export { LocalStorageRaftLog } from './raft/log/LocalStorageRaftLog';
+export { SessionStorageRaftLog } from './raft/log/SessionStorageRaftLog';
 
 // Mesh (main API)
 export { DandelionMesh, DandelionMeshOptions } from './mesh/DandelionMesh';

@@ -21,44 +21,15 @@
  *
  */
 
-import test from 'ava';
+import { StorageRaftLog } from './StorageRaftLog';
 
-import { LocalStorageRaftLog } from './LocalStorageRaftLog';
-import { runStorageRaftLogTests } from './StorageRaftLog.test-util';
-
-// Simple Storage mock
-class StorageMock implements Storage {
-  private store: Record<string, string> = {};
-
-  getItem(key: string): string | null {
-    return this.store[key] || null;
-  }
-
-  setItem(key: string, value: string): void {
-    this.store[key] = value.toString();
-  }
-
-  removeItem(key: string): void {
-    delete this.store[key];
-  }
-
-  clear(): void {
-    this.store = {};
-  }
-
-  key(index: number): string | null {
-    return Object.keys(this.store)[index] || null;
-  }
-
-  get length(): number {
-    return Object.keys(this.store).length;
+/**
+ * sessionStorage-backed Raft log implementation.
+ * Survives page refreshes within the same tab, but is cleared when the tab is closed.
+ * Useful for short-lived Raft groups or testing.
+ */
+export class SessionStorageRaftLog<T = unknown> extends StorageRaftLog<T> {
+  constructor(namespace: string) {
+    super(sessionStorage, namespace);
   }
 }
-
-test.before(() => {
-  (globalThis as any).localStorage = new StorageMock();
-});
-
-test('LocalStorageRaftLog', (t) => {
-  runStorageRaftLogTests(t, (ns) => new LocalStorageRaftLog<string>(ns));
-});
