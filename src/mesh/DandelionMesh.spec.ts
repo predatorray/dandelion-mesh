@@ -297,10 +297,10 @@ test('accepts cryptoKeyBundle as a Promise', async (t) => {
     cryptoKeyBundle: bundlePromise,
   });
 
-  transport.simulateOpen('alice');
-  await new Promise((r) => setTimeout(r, 50));
-
   const bundle = await bundlePromise;
+  transport.simulateOpen('alice');
+  // Allow the (already-resolved) crypto promise chain and broadcast to complete
+  await new Promise((r) => setTimeout(r, 10));
   const keyAnnouncements = transport.broadcasted.filter((d) =>
     isControlWire(d, 'publicKey')
   );
