@@ -115,12 +115,6 @@ graph TB
     RAFT --> TRANSPORT
     CRYPTO --> TRANSPORT
     TRANSPORT <-->|WebRTC<br/>Data Channels| TRANSPORT
-
-    style API fill:#4a9eff,color:#fff
-    style RAFT fill:#ff6b6b,color:#fff
-    style CRYPTO fill:#feca57,color:#333
-    style TRANSPORT fill:#5cd85c,color:#fff
-    style layers fill:none,stroke:none
 ```
 
 ## Low-level architecture

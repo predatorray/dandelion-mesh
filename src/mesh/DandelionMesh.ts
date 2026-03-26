@@ -36,26 +36,60 @@ export interface DandelionMeshOptions {
   raftLog?: RaftLog<MeshLogCommand>;
   /** Known peer IDs to connect to on startup */
   bootstrapPeers?: string[];
+  /**
+   * Pre-generated crypto key bundle. When provided, the mesh skips key
+   * generation and uses these keys directly. Accepts either a resolved
+   * bundle or a Promise (e.g. from a prior `generateKeyBundle()` call).
+   * If omitted, a new key pair is generated automatically.
+   */
+  cryptoKeyBundle?: CryptoKeyBundle | Promise<CryptoKeyBundle>;
 }
 
 /**
  * DandelionMesh — a fault-tolerant P2P mesh network for browser applications.
  *
- * Combines a Transport layer (default: PeerJS), RSA hybrid encryption for
- * private messages, and Raft consensus for leader election and ordered log
- * replication.
+ * Combines three layers:
+ * - **Transport** (default: PeerJS) — handles peer-to-peer WebRTC connections.
+ * - **Crypto** — RSA-OAEP + AES-256-GCM hybrid encryption for private messages.
+ * - **Raft consensus** — leader election and totally-ordered log replication.
  *
- * Usage:
+ * All application messages (public broadcasts and encrypted private messages)
+ * flow through the Raft log, guaranteeing every peer sees the same events in
+ * the same order. Non-leader peers forward proposals to the current leader.
+ *
+ * ## Events
+ *
+ * | Event            | Payload                              | When                                       |
+ * |------------------|--------------------------------------|---------------------------------------------|
+ * | `ready`          | `localPeerId: string`                | Transport is open and Raft has started       |
+ * | `message`        | `MeshMessage<T>, replay: boolean`    | A committed log entry is delivered           |
+ * | `peersChanged`   | `peers: string[]`                    | A peer connects or disconnects               |
+ * | `leaderChanged`  | `leaderId: string \| null`           | Raft leader changes                          |
+ * | `error`          | `Error`                              | Transport-level error                        |
+ *
+ * @typeParam T - The application-level payload type for messages.
+ *
+ * @example
  * ```ts
  * const transport = new PeerJSTransport({ peerId: 'alice' });
- * const mesh = new DandelionMesh(transport);
+ * const mesh = new DandelionMesh<GameAction>(transport, {
+ *   bootstrapPeers: ['bob', 'charlie'],
+ * });
  *
  * mesh.on('ready', (id) => console.log('My ID:', id));
- * mesh.on('message', (msg) => console.log('Got:', msg));
+ * mesh.on('message', (msg) => {
+ *   if (msg.type === 'public')  console.log(msg.sender, msg.data);
+ *   if (msg.type === 'private') console.log('secret from', msg.sender);
+ * });
  *
- * // After peers connect:
- * mesh.sendPublic({ action: 'bet', amount: 100 });
- * mesh.sendPrivate('bob', { cards: ['Ah', 'Kd'] });
+ * await mesh.sendPublic({ action: 'bet', amount: 100 });
+ * await mesh.sendPrivate('bob', { cards: ['Ah', 'Kd'] });
+ * ```
+ *
+ * @example Providing a pre-generated crypto key bundle
+ * ```ts
+ * const bundle = await generateKeyBundle(2048);
+ * const mesh = new DandelionMesh(transport, { cryptoKeyBundle: bundle });
  * ```
  */
 export class DandelionMesh<T = unknown> {
@@ -89,8 +123,12 @@ export class DandelionMesh<T = unknown> {
       new InMemoryRaftLog<MeshLogCommand<T>>();
     this.bootstrapPeers = options?.bootstrapPeers ?? [];
 
-    // Start key generation immediately
-    this.cryptoReady = generateKeyBundle(this.modulusLength).then((bundle) => {
+    // Use provided key bundle or generate a new one
+    this.cryptoReady = (
+      options?.cryptoKeyBundle
+        ? Promise.resolve(options.cryptoKeyBundle)
+        : generateKeyBundle(this.modulusLength)
+    ).then((bundle) => {
       this.cryptoBundle = bundle;
       return bundle;
     });
