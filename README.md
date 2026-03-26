@@ -1,6 +1,12 @@
 # <img src="https://github.com/predatorray/dandelion-mesh/blob/assets/Dandelion_40x40.png?raw=true" alt="Description of image" width="40" height="40"> Dandelion Mesh
 
-Serverless mesh network for browsers using WebRTC. Connect, broadcast, and sync state without a central server.
+[![License](https://img.shields.io/github/license/predatorray/dandelion-mesh)](LICENSE)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/predatorray/dandelion-mesh/ci.yml?branch=main)](https://github.com/predatorray/dandelion-mesh/actions)
+![NPM Version](https://img.shields.io/badge/npm-not_published-blue)
+
+Serverless mesh network for browsers using WebRTC.
+
+***Connect***, ***Broadcast***, and ***Sync State*** without a central server.
 
 ## Overview
 
@@ -18,7 +24,7 @@ All without requiring a dedicated server.
 ### Install
 
 ```bash
-npm install dandelion-mesh
+npm install dandelion-mesh # not published yet
 ```
 
 ### Basic example
