@@ -15,11 +15,11 @@ type EventListenerMap<T> = {
 };
 
 export interface RaftNodeOptions {
-  /** Minimum election timeout in ms (default 150) */
+  /** Minimum election timeout in ms (default 2000) */
   electionTimeoutMin?: number;
-  /** Maximum election timeout in ms (default 300) */
+  /** Maximum election timeout in ms (default 4000) */
   electionTimeoutMax?: number;
-  /** Heartbeat interval in ms (default 50) */
+  /** Heartbeat interval in ms (default 400) */
   heartbeatInterval?: number;
 }
 
@@ -80,9 +80,9 @@ export class RaftNode<T = unknown> {
     this.id = id;
     this.log = log;
 
-    this.electionTimeoutMin = options?.electionTimeoutMin ?? 150;
-    this.electionTimeoutMax = options?.electionTimeoutMax ?? 300;
-    this.heartbeatInterval = options?.heartbeatInterval ?? 50;
+    this.electionTimeoutMin = options?.electionTimeoutMin ?? 2000;
+    this.electionTimeoutMax = options?.electionTimeoutMax ?? 4000;
+    this.heartbeatInterval = options?.heartbeatInterval ?? 400;
 
     // Restore persistent state
     const state = this.log.loadState();
@@ -361,10 +361,11 @@ export class RaftNode<T = unknown> {
       return;
     }
 
-    // Valid leader — reset election timer and update leader
-    this.resetElectionTimer();
-    if (this.role === 'candidate') {
+    // Valid leader — become follower if not already
+    if (this.role !== 'follower') {
       this.becomeFollower();
+    } else {
+      this.resetElectionTimer();
     }
     if (this.leaderId !== args.leaderId) {
       this.leaderId = args.leaderId;
@@ -376,12 +377,14 @@ export class RaftNode<T = unknown> {
       const prevTerm = this.log.getTerm(args.prevLogIndex);
       if (prevTerm === 0 && args.prevLogIndex > this.log.lastIndex()) {
         // We don't have an entry at prevLogIndex
+        this.resetElectionTimer();
         this.sendMessage(args.leaderId, reply);
         return;
       }
       if (prevTerm !== args.prevLogTerm) {
         // Conflict: delete this entry and everything after
         this.log.truncateFrom(args.prevLogIndex);
+        this.resetElectionTimer();
         this.sendMessage(args.leaderId, reply);
         return;
       }
@@ -416,6 +419,7 @@ export class RaftNode<T = unknown> {
 
     reply.success = true;
     reply.matchIndex = args.prevLogIndex + args.entries.length;
+    this.resetElectionTimer();
     this.sendMessage(args.leaderId, reply);
   }
 
