@@ -24,3 +24,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Generate LCOV report
+        if: matrix.node-version == 22
+        run: npx nyc report --reporter=lcov
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        if: matrix.node-version == 22
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: predatorray/dandelion-mesh
+          files: coverage/lcov.info
