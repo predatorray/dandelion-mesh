@@ -119,8 +119,8 @@ graph TB
 
     API --> RAFT
     API --> CRYPTO
+    CRYPTO --> RAFT
     RAFT --> TRANSPORT
-    CRYPTO --> TRANSPORT
     TRANSPORT <-->|WebRTC<br/>Data Channels| TRANSPORT
 ```
 
@@ -179,7 +179,7 @@ stateDiagram-v2
 
 - **Two log backends** — `InMemoryRaftLog` for ephemeral sessions, `LocalStorageRaftLog` for peers that need to survive page refreshes and rejoin.
 
-- **Hybrid encryption** — Private messages use RSA-OAEP to wrap a random AES-256-GCM key. Public keys are broadcast as control messages when peers connect. All peers see the encrypted log entry, but only the intended recipient can decrypt it.
+- **Hybrid encryption** — Private messages use RSA-OAEP to wrap a random AES-256-GCM key. Public keys are exchanged as Raft log entries, so every peer receives them through the same ordered replication path. All peers see the encrypted log entry, but only the intended recipient can decrypt it.
 
 - **Ordered delivery via Raft** — All messages (public and encrypted private) go through Raft as log entries. Non-leader peers forward proposals to the leader. Once committed, public messages are delivered to all; encrypted messages are decrypted only by the intended recipient. This guarantees total ordering of all events across the cluster.
 
