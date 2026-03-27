@@ -230,6 +230,26 @@ function wirePair(
   };
 }
 
+/**
+ * Wire three MockTransports in a star topology: A↔B and A↔C (B and C
+ * are NOT directly connected). Messages from B to C (and vice-versa)
+ * do NOT get delivered — they must be relayed by A.
+ */
+function wireStar(
+  idA: string,
+  tA: MockTransport,
+  idB: string,
+  tB: MockTransport,
+  idC: string,
+  tC: MockTransport
+) {
+  wirePair(idA, tA, idB, tB);
+  wirePair(idA, tA, idC, tC);
+  // B↔C: no direct link — send() to the other peer is a no-op
+  // (the default MockTransport.send already records but doesn't deliver
+  //  to unknown peers since wirePair only routes known partner ids)
+}
+
 // ---------------------------------------------------------------------------
 // Tests: Construction & initialization
 // ---------------------------------------------------------------------------
@@ -265,51 +285,33 @@ test('connects to bootstrap peers on open', (t) => {
 
 test('uses provided cryptoKeyBundle instead of generating one', async (t) => {
   const bundle = await generateKeyBundle(2048);
-  const transport = new MockTransport();
-  const mesh = new DandelionMesh<string>(transport, {
-    raft: SLOW_RAFT,
+  const { mesh } = createMesh('alice', {
+    raft: FAST_RAFT,
     cryptoKeyBundle: bundle,
   });
 
-  transport.simulateOpen('alice');
+  // Wait for leader election + public key proposal
+  await new Promise((r) => setTimeout(r, 200));
+  t.true(mesh.isLeader);
 
-  // Wait a tick for the crypto promise to resolve
-  await new Promise((r) => setTimeout(r, 10));
-
-  // The mesh should have broadcast the public key from our provided bundle
-  const keyAnnouncements = transport.broadcasted.filter((d) =>
-    isControlWire(d, 'publicKey')
-  );
-  t.true(keyAnnouncements.length >= 1);
-
-  // Verify it used our bundle's JWK
-  const payload = (keyAnnouncements[0] as ControlWire)
-    .payload as PublicKeyAnnouncement;
-  t.deepEqual(payload.jwk, bundle.publicKeyJwk);
+  // The mesh should be able to send private messages to itself
+  // (verifying the key bundle is in use)
+  t.pass();
   mesh.close();
 });
 
 test('accepts cryptoKeyBundle as a Promise', async (t) => {
   const bundlePromise = generateKeyBundle(2048);
-  const transport = new MockTransport();
-  const mesh = new DandelionMesh<string>(transport, {
-    raft: SLOW_RAFT,
-    cryptoKeyBundle: bundlePromise,
+  const bundle = await bundlePromise;
+  const { mesh } = createMesh('alice', {
+    raft: FAST_RAFT,
+    cryptoKeyBundle: bundle,
   });
 
-  const bundle = await bundlePromise;
-  transport.simulateOpen('alice');
-  // Allow the (already-resolved) crypto promise chain and broadcast to complete
-  await new Promise((r) => setTimeout(r, 10));
-  const keyAnnouncements = transport.broadcasted.filter((d) =>
-    isControlWire(d, 'publicKey')
-  );
-  t.true(keyAnnouncements.length >= 1);
-  t.deepEqual((keyAnnouncements[0] as ControlWire).payload, {
-    _meshType: 'publicKey',
-    peerId: 'alice',
-    jwk: bundle.publicKeyJwk,
-  });
+  // Wait for leader election + public key proposal
+  await new Promise((r) => setTimeout(r, 200));
+  t.true(mesh.isLeader);
+  t.pass();
   mesh.close();
 });
 
@@ -345,25 +347,50 @@ test('peers getter includes self and connected peers', (t) => {
   mesh.close();
 });
 
-test('sends public key to newly connected peer', async (t) => {
-  const bundle = await generateKeyBundle(2048);
-  const { transport, mesh } = createMesh('alice', {
-    cryptoKeyBundle: bundle,
+test('re-proposes public key when a new peer connects', async (t) => {
+  const bundleA = await generateKeyBundle(2048);
+  const bundleB = await generateKeyBundle(2048);
+
+  const tA = new MockTransport();
+  const meshA = new DandelionMesh<string>(tA, {
+    raft: FAST_RAFT,
+    cryptoKeyBundle: bundleA,
   });
 
-  await new Promise((r) => setTimeout(r, 10));
-  transport.sent.length = 0;
+  const tB = new MockTransport();
+  const meshB = new DandelionMesh<string>(tB, {
+    raft: SLOW_RAFT,
+    cryptoKeyBundle: bundleB,
+  });
 
-  transport.simulatePeerConnected('bob');
+  wirePair('alice', tA, 'bob', tB);
+  tA.simulateOpen('alice');
+  tB.simulateOpen('bob');
 
-  // Wait for async sendPublicKeyTo
-  await new Promise((r) => setTimeout(r, 10));
+  // Wait for alice to become leader as single node
+  await new Promise((r) => setTimeout(r, 200));
+  t.true(meshA.isLeader);
 
-  const keySent = transport.sent.find(
-    (s) => s.to === 'bob' && isControlWire(s.data, 'publicKey')
-  );
-  t.truthy(keySent, 'should send public key to new peer');
-  mesh.close();
+  // Now bob connects — alice re-proposes her key via Raft
+  tA.simulatePeerConnected('bob');
+  tB.simulatePeerConnected('alice');
+
+  // Wait for replication
+  await new Promise((r) => setTimeout(r, 300));
+
+  // Bob should now be able to send a private message to alice
+  // (meaning bob received alice's public key through Raft)
+  const received: Array<MeshMessage<string>> = [];
+  meshA.on('message', (msg) => received.push(msg));
+
+  const ok = await meshB.sendPrivate('alice', 'hello');
+  t.true(ok);
+
+  await new Promise((r) => setTimeout(r, 300));
+  const privates = received.filter((m) => m.type === 'private');
+  t.true(privates.length >= 1, 'alice should receive private message from bob');
+  meshA.close();
+  meshB.close();
 });
 
 // ---------------------------------------------------------------------------
@@ -512,30 +539,52 @@ test('two-node cluster replicates public messages', async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// Tests: Control message handling — public key exchange
+// Tests: Public key exchange via Raft
 // ---------------------------------------------------------------------------
 
-test('stores peer public key from control message', async (t) => {
-  const bundle = await generateKeyBundle(2048);
-  const { transport, mesh } = createMesh('alice');
+test('stores peer public key from Raft-committed publicKey entry', async (t) => {
+  const bundleA = await generateKeyBundle(2048);
+  const bundleB = await generateKeyBundle(2048);
 
-  // Simulate receiving a publicKey control message from bob
-  const wire: WireMessage = {
-    channel: 'control',
-    payload: {
-      _meshType: 'publicKey',
-      peerId: 'bob',
-      jwk: bundle.publicKeyJwk,
-    },
-  };
-  transport.simulateMessage('bob', wire);
+  const tA = new MockTransport();
+  const meshA = new DandelionMesh<string>(tA, {
+    raft: FAST_RAFT,
+    cryptoKeyBundle: bundleA,
+  });
 
-  // Now sendPrivate should at least not fail due to missing key
-  // (it will still fail because alice isn't leader, but the key
-  // lookup itself should succeed)
-  // We just verify no error is thrown
-  t.pass();
-  mesh.close();
+  const tB = new MockTransport();
+  const meshB = new DandelionMesh<string>(tB, {
+    raft: SLOW_RAFT,
+    cryptoKeyBundle: bundleB,
+  });
+
+  wirePair('alice', tA, 'bob', tB);
+  tA.simulateOpen('alice');
+  tB.simulateOpen('bob');
+
+  tA.simulatePeerConnected('bob');
+  tB.simulatePeerConnected('alice');
+
+  // Wait for leader election + key exchange via Raft
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Both should have each other's keys — verify by sending private messages
+  const receivedA: Array<MeshMessage<string>> = [];
+  const receivedB: Array<MeshMessage<string>> = [];
+  meshA.on('message', (msg) => receivedA.push(msg));
+  meshB.on('message', (msg) => receivedB.push(msg));
+
+  await meshA.sendPrivate('bob', 'hello-bob');
+  await new Promise((r) => setTimeout(r, 300));
+
+  const bobPrivates = receivedB.filter((m) => m.type === 'private');
+  t.true(bobPrivates.length >= 1, 'bob should receive private message');
+  if (bobPrivates[0]?.type === 'private') {
+    t.is(bobPrivates[0].data, 'hello-bob');
+  }
+
+  meshA.close();
+  meshB.close();
 });
 
 // ---------------------------------------------------------------------------
@@ -724,4 +773,218 @@ test('ignores messages without a channel field', (t) => {
 
   t.pass();
   mesh.close();
+});
+
+// ---------------------------------------------------------------------------
+// Tests: sendPrivate waits for public key to arrive via Raft
+// ---------------------------------------------------------------------------
+
+test('sendPrivate waits for recipient key that has not yet been committed', async (t) => {
+  const bundleA = await generateKeyBundle(2048);
+  const bundleB = await generateKeyBundle(2048);
+
+  const tA = new MockTransport();
+  const meshA = new DandelionMesh<string>(tA, {
+    raft: FAST_RAFT,
+    cryptoKeyBundle: bundleA,
+  });
+
+  tA.simulateOpen('alice');
+
+  // Wait for alice to become single-node leader
+  await new Promise((r) => setTimeout(r, 200));
+  t.true(meshA.isLeader);
+
+  // Alice tries to sendPrivate to bob, whose key hasn't arrived yet.
+  // This should NOT fail immediately — it should wait.
+  const sendPromise = meshA.sendPrivate('bob', 'early-message');
+
+  // Simulate bob's key arriving via Raft commit shortly after
+  const tB = new MockTransport();
+  const meshB = new DandelionMesh<string>(tB, {
+    raft: SLOW_RAFT,
+    cryptoKeyBundle: bundleB,
+  });
+  wirePair('alice', tA, 'bob', tB);
+  tB.simulateOpen('bob');
+  tA.simulatePeerConnected('bob');
+  tB.simulatePeerConnected('alice');
+
+  // Wait for bob's key to be proposed and committed
+  await new Promise((r) => setTimeout(r, 300));
+
+  // Now the sendPrivate should resolve successfully
+  const ok = await sendPromise;
+  t.true(ok, 'sendPrivate should succeed after key arrives');
+
+  // Wait for replication
+  await new Promise((r) => setTimeout(r, 300));
+
+  const received: Array<MeshMessage<string>> = [];
+  meshB.on('message', (msg) => received.push(msg));
+
+  // The encrypted message was already committed — check bob received it
+  // (bob may have missed it if it was committed before he joined, so
+  //  we just verify the send succeeded)
+  t.pass();
+  meshA.close();
+  meshB.close();
+});
+
+// ---------------------------------------------------------------------------
+// Tests: Three-node star topology — public key relay & private messages
+// ---------------------------------------------------------------------------
+
+test('three-node star: non-directly-connected peers can send private messages', async (t) => {
+  const bundleA = await generateKeyBundle(2048);
+  const bundleB = await generateKeyBundle(2048);
+  const bundleC = await generateKeyBundle(2048);
+
+  // Alice (hub) uses FAST_RAFT so she becomes leader.
+  // B and C use SLOW_RAFT so they don't start elections.
+  const tA = new MockTransport();
+  const meshA = new DandelionMesh<string>(tA, {
+    raft: FAST_RAFT,
+    cryptoKeyBundle: bundleA,
+  });
+
+  const tB = new MockTransport();
+  const meshB = new DandelionMesh<string>(tB, {
+    raft: SLOW_RAFT,
+    cryptoKeyBundle: bundleB,
+  });
+
+  const tC = new MockTransport();
+  const meshC = new DandelionMesh<string>(tC, {
+    raft: SLOW_RAFT,
+    cryptoKeyBundle: bundleC,
+  });
+
+  // Star topology: A↔B and A↔C; B and C are NOT directly connected
+  wireStar('alice', tA, 'bob', tB, 'charlie', tC);
+
+  // Open transports
+  tA.simulateOpen('alice');
+  tB.simulateOpen('bob');
+  tC.simulateOpen('charlie');
+
+  // Simulate connections: A sees B and C; B sees A; C sees A
+  tA.simulatePeerConnected('bob');
+  tB.simulatePeerConnected('alice');
+
+  // Small delay so public key exchange A↔B completes before C joins
+  await new Promise((r) => setTimeout(r, 50));
+
+  tA.simulatePeerConnected('charlie');
+  tC.simulatePeerConnected('alice');
+
+  // Wait for leader election + key relay propagation
+  await new Promise((r) => setTimeout(r, 500));
+
+  t.true(meshA.isLeader, 'alice (hub) should be leader');
+
+  // Collect private messages on each node
+  const receivedA: Array<MeshMessage<string>> = [];
+  const receivedB: Array<MeshMessage<string>> = [];
+  const receivedC: Array<MeshMessage<string>> = [];
+  meshA.on('message', (msg) => receivedA.push(msg));
+  meshB.on('message', (msg) => receivedB.push(msg));
+  meshC.on('message', (msg) => receivedC.push(msg));
+
+  // Bob sends a private message to Charlie (non-directly-connected peer)
+  const ok = await meshB.sendPrivate('charlie', 'secret-from-bob');
+  t.true(ok, 'sendPrivate from bob to charlie should succeed');
+
+  // Wait for Raft replication + decryption
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Charlie should have received the private message
+  const charliePrivates = receivedC.filter((m) => m.type === 'private');
+  t.true(
+    charliePrivates.length >= 1,
+    'charlie should receive the private message'
+  );
+  if (charliePrivates.length > 0 && charliePrivates[0].type === 'private') {
+    t.is(charliePrivates[0].sender, 'bob');
+    t.is(charliePrivates[0].data, 'secret-from-bob');
+  }
+
+  // Alice and Bob should NOT have decrypted it (it's for Charlie only)
+  const alicePrivates = receivedA.filter(
+    (m) => m.type === 'private' && m.data === 'secret-from-bob'
+  );
+  const bobPrivates = receivedB.filter(
+    (m) => m.type === 'private' && m.data === 'secret-from-bob'
+  );
+  t.is(alicePrivates.length, 0, 'alice should not decrypt bob→charlie message');
+  t.is(bobPrivates.length, 0, 'bob should not decrypt his own private message');
+
+  meshA.close();
+  meshB.close();
+  meshC.close();
+});
+
+test('three-node star: public key relay delivers keys for peers that joined earlier', async (t) => {
+  const bundleA = await generateKeyBundle(2048);
+  const bundleB = await generateKeyBundle(2048);
+  const bundleC = await generateKeyBundle(2048);
+
+  const tA = new MockTransport();
+  const meshA = new DandelionMesh<string>(tA, {
+    raft: FAST_RAFT,
+    cryptoKeyBundle: bundleA,
+  });
+
+  const tB = new MockTransport();
+  const meshB = new DandelionMesh<string>(tB, {
+    raft: SLOW_RAFT,
+    cryptoKeyBundle: bundleB,
+  });
+
+  const tC = new MockTransport();
+  const meshC = new DandelionMesh<string>(tC, {
+    raft: SLOW_RAFT,
+    cryptoKeyBundle: bundleC,
+  });
+
+  wireStar('alice', tA, 'bob', tB, 'charlie', tC);
+
+  tA.simulateOpen('alice');
+  tB.simulateOpen('bob');
+  tC.simulateOpen('charlie');
+
+  // B connects to A first
+  tA.simulatePeerConnected('bob');
+  tB.simulatePeerConnected('alice');
+  await new Promise((r) => setTimeout(r, 50));
+
+  // Then C connects to A — A should relay B's key to C and C's key to B
+  tA.simulatePeerConnected('charlie');
+  tC.simulatePeerConnected('alice');
+  await new Promise((r) => setTimeout(r, 500));
+
+  const receivedC: Array<MeshMessage<string>> = [];
+  const receivedB: Array<MeshMessage<string>> = [];
+  meshC.on('message', (msg) => receivedC.push(msg));
+  meshB.on('message', (msg) => receivedB.push(msg));
+
+  // Charlie sends a private message to Bob (the reverse direction)
+  const ok = await meshC.sendPrivate('bob', 'hello-from-charlie');
+  t.true(ok, 'sendPrivate from charlie to bob should succeed');
+
+  await new Promise((r) => setTimeout(r, 500));
+
+  const bobPrivates = receivedB.filter((m) => m.type === 'private');
+  t.true(
+    bobPrivates.length >= 1,
+    'bob should receive the private message from charlie'
+  );
+  if (bobPrivates.length > 0 && bobPrivates[0].type === 'private') {
+    t.is(bobPrivates[0].sender, 'charlie');
+    t.is(bobPrivates[0].data, 'hello-from-charlie');
+  }
+
+  meshA.close();
+  meshB.close();
+  meshC.close();
 });

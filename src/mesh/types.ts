@@ -44,7 +44,8 @@ export interface PublicMessageEntry<T = unknown> {
 /** Union of all Raft log command types */
 export type MeshLogCommand<T = unknown> =
   | PublicMessageEntry<T>
-  | EncryptedPrivateMessage;
+  | EncryptedPrivateMessage
+  | PublicKeyAnnouncement;
 
 /** A proposal forwarded from a non-leader to the leader */
 export interface ProposeMessage<T = unknown> {
@@ -53,9 +54,7 @@ export interface ProposeMessage<T = unknown> {
 }
 
 /** Internal transport-level messages (not replicated via Raft) */
-export type MeshControlMessage<T = unknown> =
-  | PublicKeyAnnouncement
-  | ProposeMessage<T>;
+export type MeshControlMessage<T = unknown> = ProposeMessage<T>;
 
 /** Wrapper to distinguish Raft messages from mesh control messages on the wire */
 export interface WireMessage {

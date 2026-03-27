@@ -101,6 +101,10 @@ export class DandelionMesh<T = unknown> {
   private readonly cryptoReady: Promise<CryptoKeyBundle>;
   private cryptoBundle: CryptoKeyBundle | null = null;
   private readonly peerPublicKeys = new Map<string, Promise<CryptoKey>>();
+  private readonly pendingKeyWaiters = new Map<
+    string,
+    Array<(key: Promise<CryptoKey>) => void>
+  >();
 
   private readonly modulusLength: number;
   private readonly raftOptions: RaftNodeOptions;
@@ -171,8 +175,6 @@ export class DandelionMesh<T = unknown> {
     if (!this.raftNode || !this.localPeerId) return false;
 
     const recipientKey = await this.getOrAwaitPublicKey(recipientPeerId);
-    if (!recipientKey) return false;
-
     const plaintext = new TextEncoder().encode(JSON.stringify(data));
     const payload = await encrypt(plaintext, recipientKey);
 
@@ -280,17 +282,15 @@ export class DandelionMesh<T = unknown> {
 
     this.emit('ready', peerId);
 
-    // Broadcast our public key to any already-connected peers
-    this.broadcastPublicKey();
+    // Propose our public key through Raft so all peers (including
+    // those joining later) receive it via log replay.
+    this.proposePublicKey();
   };
 
-  private onPeerConnected = (remotePeerId: string): void => {
+  private onPeerConnected = (_remotePeerId: string): void => {
     // Update Raft cluster membership
     this.raftNode?.updatePeers(this.transport.connectedPeers as string[]);
     this.emit('peersChanged', this.peers);
-
-    // Send our public key to the new peer
-    this.sendPublicKeyTo(remotePeerId);
   };
 
   private onPeerDisconnected = (_remotePeerId: string): void => {
@@ -320,11 +320,6 @@ export class DandelionMesh<T = unknown> {
 
   private handleControlMessage(msg: MeshControlMessage<T>): void {
     switch (msg._meshType) {
-      case 'publicKey': {
-        const keyPromise = importPublicKey(msg.jwk);
-        this.peerPublicKeys.set(msg.peerId, keyPromise);
-        break;
-      }
       case 'propose': {
         // A non-leader peer is forwarding a command to us (the leader)
         if (this.raftNode?.isLeader()) {
@@ -358,6 +353,23 @@ export class DandelionMesh<T = unknown> {
       case 'encrypted':
         this.handleEncryptedCommit(cmd);
         break;
+
+      case 'publicKey': {
+        if (!this.peerPublicKeys.has(cmd.peerId)) {
+          const keyPromise = importPublicKey(cmd.jwk);
+          this.peerPublicKeys.set(cmd.peerId, keyPromise);
+
+          // Notify any pending sendPrivate calls waiting for this key
+          const waiters = this.pendingKeyWaiters.get(cmd.peerId);
+          if (waiters) {
+            for (const resolve of waiters) {
+              resolve(keyPromise);
+            }
+            this.pendingKeyWaiters.delete(cmd.peerId);
+          }
+        }
+        break;
+      }
     }
   };
 
@@ -395,40 +407,61 @@ export class DandelionMesh<T = unknown> {
 
   // --- Key management ---
 
-  private async broadcastPublicKey(): Promise<void> {
+  private async proposePublicKey(): Promise<void> {
     if (!this.cryptoBundle) {
       await this.cryptoReady;
     }
-    if (!this.localPeerId || !this.cryptoBundle) return;
+    if (!this.localPeerId || !this.cryptoBundle || !this.raftNode) return;
+
+    // Wait until a leader is available
+    if (!this.raftNode.isLeader() && !this.raftNode.getLeaderId()) {
+      await new Promise<void>((resolve) => {
+        const onLeader = (leaderId: string | null) => {
+          if (leaderId) {
+            this.off('leaderChanged', onLeader);
+            resolve();
+          }
+        };
+        this.on('leaderChanged', onLeader);
+      });
+    }
+
+    if (!this.raftNode) return;
 
     const announcement: PublicKeyAnnouncement = {
       _meshType: 'publicKey',
       peerId: this.localPeerId,
       jwk: this.cryptoBundle.publicKeyJwk,
     };
-    this.transport
-      .broadcast(this.wireMessage('control', announcement))
-      .catch(() => {});
-  }
 
-  private async sendPublicKeyTo(remotePeerId: string): Promise<void> {
-    if (!this.cryptoBundle) {
-      await this.cryptoReady;
+    if (this.raftNode.isLeader()) {
+      this.raftNode.propose(announcement);
+    } else {
+      const leaderId = this.raftNode.getLeaderId();
+      if (!leaderId) return;
+      const propose: ProposeMessage<T> = {
+        _meshType: 'propose',
+        command: announcement,
+      };
+      this.transport
+        .send(leaderId, this.wireMessage('control', propose))
+        .catch(() => {});
     }
-    if (!this.localPeerId || !this.cryptoBundle) return;
-
-    const announcement: PublicKeyAnnouncement = {
-      _meshType: 'publicKey',
-      peerId: this.localPeerId,
-      jwk: this.cryptoBundle.publicKeyJwk,
-    };
-    this.transport
-      .send(remotePeerId, this.wireMessage('control', announcement))
-      .catch(() => {});
   }
 
-  private getOrAwaitPublicKey(peerId: string): Promise<CryptoKey> | undefined {
-    return this.peerPublicKeys.get(peerId);
+  private async getOrAwaitPublicKey(peerId: string): Promise<CryptoKey> {
+    const existing = this.peerPublicKeys.get(peerId);
+    if (existing) return existing;
+
+    // Wait for the key to arrive via Raft commit
+    return new Promise<CryptoKey>((resolve) => {
+      let waiters = this.pendingKeyWaiters.get(peerId);
+      if (!waiters) {
+        waiters = [];
+        this.pendingKeyWaiters.set(peerId, waiters);
+      }
+      waiters.push((keyPromise) => resolve(keyPromise));
+    });
   }
 
   // --- Helpers ---
