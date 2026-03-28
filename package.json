@@ -80,6 +80,7 @@
     "build/main",
     "build/module",
     "!**/*.spec.*",
+    "!**/test-setup.*",
     "!**/*.json",
     "CHANGELOG.md",
     "LICENSE",
