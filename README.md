@@ -3,8 +3,8 @@
 [![License](https://img.shields.io/github/license/predatorray/dandelion-mesh)](LICENSE)
 [![Build Status](https://img.shields.io/github/actions/workflow/status/predatorray/dandelion-mesh/ci.yml?branch=main)](https://github.com/predatorray/dandelion-mesh/actions)
 [![codecov](https://codecov.io/github/predatorray/dandelion-mesh/graph/badge.svg?token=KqwNV13MD4)](https://codecov.io/github/predatorray/dandelion-mesh)
-![NPM Version](https://img.shields.io/badge/npm-not_published-blue)
 [![NPM Version](https://img.shields.io/npm/v/dandelion-mesh)](https://www.npmjs.com/package/dandelion-mesh)
+[![Doc](https://img.shields.io/badge/doc-html-red)](https://www.predatorray.me/dandelion-mesh/)
 
 Serverless mesh network for browsers using WebRTC.
 
