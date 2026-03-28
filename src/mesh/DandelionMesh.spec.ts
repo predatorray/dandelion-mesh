@@ -1,6 +1,8 @@
 import test from 'ava';
 
 import { CryptoKeyBundle, generateKeyBundle } from '../crypto/CryptoService';
+import { InMemoryRaftLog } from '../raft/log/InMemoryRaftLog';
+import { LogEntry } from '../raft/types';
 import {
   Transport,
   TransportEventName,
@@ -9,6 +11,7 @@ import {
 
 import { DandelionMesh } from './DandelionMesh';
 import {
+  MeshLogCommand,
   MeshMessage,
   ProposeMessage,
   PublicKeyAnnouncement,
@@ -421,17 +424,72 @@ test('single-node mesh becomes leader and commits public messages', async (t) =>
   t.true(mesh.isLeader);
   t.is(mesh.leaderId, 'alice');
 
-  const received: Array<MeshMessage<string>> = [];
-  mesh.on('message', (msg) => received.push(msg));
+  const received: Array<{ msg: MeshMessage<string>; replay: boolean }> = [];
+  mesh.on('message', (msg, replay) => received.push({ msg, replay }));
 
   const ok = await mesh.sendPublic('hello');
   t.true(ok);
   t.is(received.length, 1);
-  t.is(received[0].type, 'public');
-  if (received[0].type === 'public') {
-    t.is(received[0].sender, 'alice');
-    t.is(received[0].data, 'hello');
+  t.is(received[0].msg.type, 'public');
+  t.false(received[0].replay, 'new message should not be a replay');
+  if (received[0].msg.type === 'public') {
+    t.is(received[0].msg.sender, 'alice');
+    t.is(received[0].msg.data, 'hello');
   }
+  mesh.close();
+});
+
+// ---------------------------------------------------------------------------
+// Tests: Replay flag for pre-existing log entries
+// ---------------------------------------------------------------------------
+
+test('marks pre-existing log entries as replays on startup', async (t) => {
+  const bundle = await generateKeyBundle(2048);
+
+  // Pre-populate a raft log with a public message entry
+  const log = new InMemoryRaftLog<MeshLogCommand<string>>();
+  log.append([
+    {
+      term: 1,
+      command: { _meshType: 'public', sender: 'alice', data: 'old-msg' },
+    } as LogEntry<MeshLogCommand<string>>,
+  ]);
+  log.saveState({ currentTerm: 1, votedFor: 'alice' });
+
+  const transport = new MockTransport();
+  const mesh = new DandelionMesh<string>(transport, {
+    raft: FAST_RAFT,
+    raftLog: log,
+    cryptoKeyBundle: bundle,
+  });
+
+  const received: Array<{ msg: MeshMessage<string>; replay: boolean }> = [];
+  mesh.on('message', (msg, replay) => received.push({ msg, replay }));
+
+  transport.simulateOpen('alice');
+
+  // Wait for leader election + public key proposal which triggers
+  // advanceCommitIndex, re-applying the pre-existing entry
+  await new Promise((r) => setTimeout(r, 500));
+  t.true(mesh.isLeader);
+
+  // The old-msg entry should be replayed (index 1 <= lastAppliedIndex of 1)
+  const replayed = received.filter(
+    (r) => r.msg.type === 'public' && r.msg.data === 'old-msg'
+  );
+  t.true(replayed.length >= 1, 'pre-existing entry should be delivered');
+  t.true(replayed[0].replay, 'pre-existing entry should be marked as replay');
+
+  // Now send a new message — should NOT be a replay
+  const ok = await mesh.sendPublic('new-msg');
+  t.true(ok);
+
+  const fresh = received.filter(
+    (r) => r.msg.type === 'public' && r.msg.data === 'new-msg'
+  );
+  t.true(fresh.length >= 1, 'new message should be delivered');
+  t.false(fresh[0].replay, 'new message should not be a replay');
+
   mesh.close();
 });
 
@@ -512,10 +570,10 @@ test('two-node cluster replicates public messages', async (t) => {
   const leader = meshA.isLeader ? meshA : meshB.isLeader ? meshB : null;
   t.truthy(leader, 'one node should be leader');
 
-  const receivedA: Array<MeshMessage<string>> = [];
-  const receivedB: Array<MeshMessage<string>> = [];
-  meshA.on('message', (msg) => receivedA.push(msg));
-  meshB.on('message', (msg) => receivedB.push(msg));
+  const receivedA: Array<{ msg: MeshMessage<string>; replay: boolean }> = [];
+  const receivedB: Array<{ msg: MeshMessage<string>; replay: boolean }> = [];
+  meshA.on('message', (msg, replay) => receivedA.push({ msg, replay }));
+  meshB.on('message', (msg, replay) => receivedB.push({ msg, replay }));
 
   // Leader sends a public message
   await leader!.sendPublic('game-start');
@@ -525,13 +583,15 @@ test('two-node cluster replicates public messages', async (t) => {
 
   t.true(receivedA.length >= 1, 'alice should receive the message');
   t.true(receivedB.length >= 1, 'bob should receive the message');
-  t.is(receivedA[0].type, 'public');
-  t.is(receivedB[0].type, 'public');
-  if (receivedA[0].type === 'public') {
-    t.is(receivedA[0].data, 'game-start');
+  t.is(receivedA[0].msg.type, 'public');
+  t.is(receivedB[0].msg.type, 'public');
+  t.false(receivedA[0].replay, 'alice: new message should not be a replay');
+  t.false(receivedB[0].replay, 'bob: new message should not be a replay');
+  if (receivedA[0].msg.type === 'public') {
+    t.is(receivedA[0].msg.data, 'game-start');
   }
-  if (receivedB[0].type === 'public') {
-    t.is(receivedB[0].data, 'game-start');
+  if (receivedB[0].msg.type === 'public') {
+    t.is(receivedB[0].msg.data, 'game-start');
   }
 
   meshA.close();
@@ -633,8 +693,8 @@ test('leader processes propose control message from follower', async (t) => {
   await new Promise((r) => setTimeout(r, 200));
   t.true(mesh.isLeader);
 
-  const received: Array<MeshMessage<string>> = [];
-  mesh.on('message', (msg) => received.push(msg));
+  const received: Array<{ msg: MeshMessage<string>; replay: boolean }> = [];
+  mesh.on('message', (msg, replay) => received.push({ msg, replay }));
 
   // Simulate a propose control message arriving from a follower
   const wire: WireMessage = {
@@ -651,10 +711,11 @@ test('leader processes propose control message from follower', async (t) => {
   transport.simulateMessage('bob', wire);
 
   t.is(received.length, 1);
-  t.is(received[0].type, 'public');
-  if (received[0].type === 'public') {
-    t.is(received[0].sender, 'bob');
-    t.is(received[0].data, 'from-follower');
+  t.is(received[0].msg.type, 'public');
+  t.false(received[0].replay, 'forwarded message should not be a replay');
+  if (received[0].msg.type === 'public') {
+    t.is(received[0].msg.sender, 'bob');
+    t.is(received[0].msg.data, 'from-follower');
   }
   mesh.close();
 });

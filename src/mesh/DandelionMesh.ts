@@ -109,6 +109,7 @@ export class DandelionMesh<T = unknown> {
   private readonly modulusLength: number;
   private readonly raftOptions: RaftNodeOptions;
   private readonly bootstrapPeers: string[];
+  private lastAppliedIndex = 0;
 
   private readonly listeners: ListenerMap<T> = {
     ready: new Set(),
@@ -126,6 +127,7 @@ export class DandelionMesh<T = unknown> {
       (options?.raftLog as RaftLog<MeshLogCommand<T>>) ??
       new InMemoryRaftLog<MeshLogCommand<T>>();
     this.bootstrapPeers = options?.bootstrapPeers ?? [];
+    this.lastAppliedIndex = this.raftLog.length();
 
     // Use provided key bundle or generate a new one
     this.cryptoReady = (
@@ -334,8 +336,9 @@ export class DandelionMesh<T = unknown> {
 
   private onRaftCommitted = (
     entry: LogEntry<MeshLogCommand<T>>,
-    _index: number
+    index: number
   ): void => {
+    const isReplay = index <= this.lastAppliedIndex;
     const cmd = entry.command;
     switch (cmd._meshType) {
       case 'public':
@@ -346,12 +349,12 @@ export class DandelionMesh<T = unknown> {
             sender: cmd.sender,
             data: cmd.data,
           } as MeshMessage<T>,
-          false
+          isReplay
         );
         break;
 
       case 'encrypted':
-        this.handleEncryptedCommit(cmd);
+        this.handleEncryptedCommit(cmd, isReplay);
         break;
 
       case 'publicKey': {
@@ -371,10 +374,15 @@ export class DandelionMesh<T = unknown> {
         break;
       }
     }
+
+    if (!isReplay) {
+      this.lastAppliedIndex = index;
+    }
   };
 
   private async handleEncryptedCommit(
-    cmd: EncryptedPrivateMessage
+    cmd: EncryptedPrivateMessage,
+    isReplay: boolean
   ): Promise<void> {
     if (!this.localPeerId) return;
 
@@ -398,7 +406,7 @@ export class DandelionMesh<T = unknown> {
           recipient: cmd.recipient,
           data,
         } as MeshMessage<T>,
-        false
+        isReplay
       );
     } catch (err) {
       // Not for us or decryption failed — this is expected for other recipients
