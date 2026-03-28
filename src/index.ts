@@ -7,6 +7,8 @@ export {
 export {
   PeerJSTransport,
   PeerJSTransportOptions,
+  PeerLike,
+  DataConnectionLike,
 } from './transport/PeerJSTransport';
 
 // Crypto

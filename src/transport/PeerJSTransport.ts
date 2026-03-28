@@ -1,6 +1,27 @@
-import Peer, { DataConnection, PeerConnectOption } from 'peerjs';
+import Peer, { PeerConnectOption } from 'peerjs';
 
 import { Transport, TransportEventName, TransportEvents } from './Transport';
+
+/** Minimal subset of PeerJS DataConnection used by PeerJSTransport. */
+export interface DataConnectionLike {
+  readonly peer: string;
+  send(data: unknown): void | Promise<void>;
+  close(): void;
+  on(event: 'open', cb: () => void): void;
+  on(event: 'data', cb: (data: unknown) => void): void;
+  on(event: 'close', cb: () => void): void;
+  on(event: 'error', cb: (err: Error) => void): void;
+}
+
+/** Minimal subset of PeerJS Peer used by PeerJSTransport. */
+export interface PeerLike {
+  on(event: 'open', cb: (id: string) => void): void;
+  on(event: 'connection', cb: (conn: DataConnectionLike) => void): void;
+  on(event: 'error', cb: (err: Error) => void): void;
+  on(event: 'close', cb: () => void): void;
+  connect(peerId: string, options?: unknown): DataConnectionLike;
+  destroy(): void;
+}
 
 type ListenerMap = {
   [E in TransportEventName]: Set<TransportEvents[E]>;
@@ -18,10 +39,20 @@ export interface PeerJSTransportOptions {
   peerId?: string;
 }
 
+function isPeerLike(obj: unknown): obj is PeerLike {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'on' in obj &&
+    'connect' in obj &&
+    'destroy' in obj
+  );
+}
+
 export class PeerJSTransport implements Transport {
-  private readonly peer: Peer;
-  private readonly connections = new Map<string, DataConnection>();
-  private readonly pendingConnections = new Map<string, DataConnection>();
+  private readonly peer: PeerLike;
+  private readonly connections = new Map<string, DataConnectionLike>();
+  private readonly pendingConnections = new Map<string, DataConnectionLike>();
   private _localPeerId: string | undefined;
   private readonly listeners: ListenerMap = {
     open: new Set(),
@@ -32,17 +63,24 @@ export class PeerJSTransport implements Transport {
     close: new Set(),
   };
 
-  constructor(options?: PeerJSTransportOptions) {
-    this.peer = options?.peerId
-      ? new Peer(options.peerId, options?.peerOptions)
-      : new Peer(options?.peerOptions);
+  constructor(peer: PeerLike);
+  constructor(options?: PeerJSTransportOptions);
+  constructor(peerOrOptions?: PeerLike | PeerJSTransportOptions) {
+    if (peerOrOptions && isPeerLike(peerOrOptions)) {
+      this.peer = peerOrOptions;
+    } else {
+      const options = peerOrOptions as PeerJSTransportOptions | undefined;
+      this.peer = options?.peerId
+        ? new Peer(options.peerId, options?.peerOptions)
+        : new Peer(options?.peerOptions);
+    }
 
     this.peer.on('open', (id: string) => {
       this._localPeerId = id;
       this.emit('open', id);
     });
 
-    this.peer.on('connection', (conn: DataConnection) => {
+    this.peer.on('connection', (conn: DataConnectionLike) => {
       this.setupConnection(conn);
     });
 
@@ -113,7 +151,7 @@ export class PeerJSTransport implements Transport {
     this.peer.destroy();
   }
 
-  private setupConnection(conn: DataConnection): void {
+  private setupConnection(conn: DataConnectionLike): void {
     const remotePeerId = conn.peer;
     this.pendingConnections.set(remotePeerId, conn);
 
