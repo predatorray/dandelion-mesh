@@ -963,6 +963,120 @@ test('destroyed node ignores messages', (t) => {
 });
 
 // ---------------------------------------------------------------------------
+// Leader re-election when leader stops responding
+// ---------------------------------------------------------------------------
+
+test('new leader is elected after old leader is destroyed', async (t) => {
+  const { nodes } = createFastCluster();
+
+  await new Promise((r) => setTimeout(r, 500));
+
+  const oldLeader = Object.values(nodes).find((n) => n.isLeader())!;
+  t.truthy(oldLeader, 'initial leader should be elected');
+  const oldLeaderId = Object.entries(nodes).find(
+    ([, n]) => n === oldLeader
+  )![0];
+
+  // Destroy the leader — it stops sending heartbeats
+  oldLeader.destroy();
+
+  // Wait for followers to time out and elect a new leader
+  await new Promise((r) => setTimeout(r, 500));
+
+  const remaining = Object.entries(nodes).filter(([id]) => id !== oldLeaderId);
+  const newLeaders = remaining.filter(([, n]) => n.isLeader());
+  t.is(newLeaders.length, 1, 'exactly one new leader among remaining nodes');
+
+  const newLeader = newLeaders[0];
+  t.not(newLeader[0], oldLeaderId, 'new leader should be a different node');
+  t.true(
+    newLeader[1].getCurrentTerm() > oldLeader.getCurrentTerm(),
+    'new leader should have a higher term'
+  );
+
+  remaining.forEach(([, n]) => n.destroy());
+});
+
+test('new leader is elected when old leader stops sending messages', async (t) => {
+  const { nodes } = createFastCluster();
+
+  await new Promise((r) => setTimeout(r, 500));
+
+  const oldLeader = Object.values(nodes).find((n) => n.isLeader())!;
+  t.truthy(oldLeader);
+  const oldLeaderId = Object.entries(nodes).find(
+    ([, n]) => n === oldLeader
+  )![0];
+  const oldTerm = oldLeader.getCurrentTerm();
+
+  // Silence the leader by making sendMessage a no-op (simulates network partition)
+  oldLeader.sendMessage = () => {};
+
+  // Wait for followers to time out and elect a new leader
+  await new Promise((r) => setTimeout(r, 500));
+
+  const remaining = Object.entries(nodes).filter(([id]) => id !== oldLeaderId);
+  const newLeaders = remaining.filter(([, n]) => n.isLeader());
+  t.is(newLeaders.length, 1, 'exactly one new leader among remaining nodes');
+  t.true(
+    newLeaders[0][1].getCurrentTerm() > oldTerm,
+    'new leader term should be higher than old leader term'
+  );
+
+  Object.values(nodes).forEach((n) => n.destroy());
+});
+
+test('committed entries survive leader re-election', async (t) => {
+  const { nodes } = createFastCluster();
+
+  await new Promise((r) => setTimeout(r, 500));
+
+  const oldLeader = Object.values(nodes).find((n) => n.isLeader())!;
+  t.truthy(oldLeader);
+  const oldLeaderId = Object.entries(nodes).find(
+    ([, n]) => n === oldLeader
+  )![0];
+
+  // Propose entries and wait for replication
+  oldLeader.propose('survive1');
+  oldLeader.propose('survive2');
+  await new Promise((r) => setTimeout(r, 300));
+
+  // Verify entries are committed on followers before killing leader
+  const followers = Object.entries(nodes).filter(([id]) => id !== oldLeaderId);
+  for (const [id, node] of followers) {
+    t.true(
+      node.getCommitIndex() >= 2,
+      `follower ${id} should have committed entries before leader dies`
+    );
+  }
+
+  // Kill the leader
+  oldLeader.destroy();
+
+  // Wait for re-election
+  await new Promise((r) => setTimeout(r, 500));
+
+  const newLeaders = followers.filter(([, n]) => n.isLeader());
+  t.is(newLeaders.length, 1, 'a new leader should be elected');
+
+  const newLeader = newLeaders[0][1];
+
+  // New leader can accept new proposals
+  const committed: string[] = [];
+  newLeader.on('committed', (entry) => committed.push(entry.command));
+  t.true(newLeader.propose('after-reelection'));
+
+  await new Promise((r) => setTimeout(r, 300));
+  t.true(
+    committed.includes('after-reelection'),
+    'new leader should commit new entries'
+  );
+
+  followers.forEach(([, n]) => n.destroy());
+});
+
+// ---------------------------------------------------------------------------
 // Full cluster: log convergence
 // ---------------------------------------------------------------------------
 

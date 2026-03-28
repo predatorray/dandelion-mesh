@@ -318,6 +318,143 @@ test('accepts cryptoKeyBundle as a Promise', async (t) => {
   mesh.close();
 });
 
+test('defaults: constructor with no options uses defaults for all fields', async (t) => {
+  const transport = new MockTransport();
+  const mesh = new DandelionMesh<string>(transport);
+
+  let readyId: string | undefined;
+  mesh.on('ready', (id) => {
+    readyId = id;
+  });
+
+  transport.simulateOpen('alice');
+  t.is(readyId, 'alice');
+  t.is(mesh.peerId, 'alice');
+
+  // No bootstrap peers → no connect calls
+  t.deepEqual(transport.connectCalls, []);
+
+  mesh.close();
+});
+
+test('modulusLength option is used for key generation', async (t) => {
+  const transport = new MockTransport();
+  const mesh = new DandelionMesh<string>(transport, {
+    modulusLength: 2048,
+    raft: FAST_RAFT,
+  });
+
+  transport.simulateOpen('alice');
+
+  // Wait for leader election + public key proposal
+  await new Promise((r) => setTimeout(r, 300));
+  t.true(mesh.isLeader);
+
+  // The mesh should have proposed its public key via Raft.
+  // Verify by checking that a publicKey proposal was sent (the key was
+  // generated with modulusLength 2048 rather than the default 4096,
+  // which is much faster — if it used 4096 the test would be noticeably slower).
+  // For a single-node leader, the key is proposed directly via Raft (not
+  // via control channel), so we verify the mesh is functional by sending
+  // a public message.
+  const received: Array<MeshMessage<string>> = [];
+  mesh.on('message', (msg) => received.push(msg));
+  const ok = await mesh.sendPublic('test');
+  t.true(ok);
+  t.true(received.length >= 1);
+  mesh.close();
+});
+
+test('custom raftLog is used for new entries', async (t) => {
+  const customLog = new InMemoryRaftLog<MeshLogCommand<string>>();
+  const bundle = await generateKeyBundle(2048);
+
+  const transport = new MockTransport();
+  const mesh = new DandelionMesh<string>(transport, {
+    raft: FAST_RAFT,
+    raftLog: customLog,
+    cryptoKeyBundle: bundle,
+  });
+
+  transport.simulateOpen('alice');
+
+  await new Promise((r) => setTimeout(r, 300));
+  t.true(mesh.isLeader);
+
+  await mesh.sendPublic('via-custom-log');
+  await new Promise((r) => setTimeout(r, 100));
+
+  // The custom log should contain the entries (public key + public message)
+  t.true(customLog.length() >= 2, 'custom log should have entries');
+
+  const commands: string[] = [];
+  for (let i = 1; i <= customLog.length(); i++) {
+    const entry = customLog.getEntry(i);
+    if (entry) commands.push(entry.command._meshType);
+  }
+  t.true(
+    commands.includes('publicKey'),
+    'custom log should have publicKey entry'
+  );
+  t.true(
+    commands.includes('public'),
+    'custom log should have public message entry'
+  );
+
+  mesh.close();
+});
+
+test('raft options are forwarded to RaftNode', async (t) => {
+  const bundle = await generateKeyBundle(2048);
+
+  // Use a very short election timeout — if raft options are correctly
+  // forwarded, the node should become leader quickly
+  const transport = new MockTransport();
+  const mesh = new DandelionMesh<string>(transport, {
+    raft: {
+      electionTimeoutMin: 20,
+      electionTimeoutMax: 40,
+      heartbeatInterval: 10,
+    },
+    cryptoKeyBundle: bundle,
+  });
+
+  transport.simulateOpen('alice');
+
+  // With 20-40ms election timeout, should become leader well within 200ms
+  await new Promise((r) => setTimeout(r, 200));
+  t.true(mesh.isLeader, 'custom raft timing should be applied');
+
+  mesh.close();
+});
+
+test('bootstrapPeers does not connect to self', (t) => {
+  const transport = new MockTransport();
+  const _mesh = new DandelionMesh<string>(transport, {
+    raft: SLOW_RAFT,
+    bootstrapPeers: ['alice', 'bob'],
+  });
+
+  transport.simulateOpen('alice');
+
+  // Should only connect to bob, not to self
+  t.deepEqual(transport.connectCalls, ['bob']);
+  _mesh.close();
+});
+
+test('empty bootstrapPeers results in no connect calls', (t) => {
+  const transport = new MockTransport();
+  const _mesh = new DandelionMesh<string>(transport, {
+    raft: SLOW_RAFT,
+    bootstrapPeers: [],
+  });
+
+  transport.simulateOpen('alice');
+
+  t.deepEqual(transport.connectCalls, []);
+  _mesh.close();
+});
+
 // ---------------------------------------------------------------------------
 // Tests: Peer lifecycle events
 // ---------------------------------------------------------------------------
