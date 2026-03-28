@@ -172,12 +172,12 @@ stateDiagram-v2
 - **Transport abstraction** — The `Transport` interface decouples the mesh from PeerJS. Any P2P transport (WebSocket, libp2p, etc.) can be plugged in by implementing the interface.
 
 - **Raft consensus** — Full implementation per the [Raft paper](https://raft.github.io/raft.pdf):
-  - Leader election with randomized timeouts (150–300ms default)
+  - Leader election with randomized timeouts (2000–4000ms default)
   - Log replication with AppendEntries consistency checks
   - Commitment only for current-term entries (Figure 8 safety)
   - Dynamic membership updates as peers join/leave
 
-- **Two log backends** — `InMemoryRaftLog` for ephemeral sessions, `LocalStorageRaftLog` for peers that need to survive page refreshes and rejoin.
+- **Three log backends** — `InMemoryRaftLog` for ephemeral sessions, `LocalStorageRaftLog` for peers that need to survive page refreshes and rejoin, and `SessionStorageRaftLog` for per-tab durability that clears when the tab is closed.
 
 - **Hybrid encryption** — Private messages use RSA-OAEP to wrap a random AES-256-GCM key. Public keys are exchanged as Raft log entries, so every peer receives them through the same ordered replication path. All peers see the encrypted log entry, but only the intended recipient can decrypt it.
 
