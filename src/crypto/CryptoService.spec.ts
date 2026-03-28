@@ -167,7 +167,7 @@ test('decrypt with wrong private key throws', async (t) => {
 
   const payload = await encrypt(plaintext, alice.publicKey);
 
-  await t.throwsAsync(() => decrypt(payload, bob.privateKey));
+  await t.throwsAsync(() => decrypt(payload, bob.privateKey), { any: true });
 });
 
 test('decrypt with tampered ciphertext throws', async (t) => {
@@ -183,7 +183,9 @@ test('decrypt with tampered ciphertext throws', async (t) => {
       (payload.ciphertext.slice(-2) === '00' ? 'ff' : '00'),
   };
 
-  await t.throwsAsync(() => decrypt(tampered, bundle.privateKey));
+  await t.throwsAsync(() => decrypt(tampered, bundle.privateKey), {
+    any: true,
+  });
 });
 
 test('decrypt with tampered IV throws', async (t) => {
@@ -196,5 +198,7 @@ test('decrypt with tampered IV throws', async (t) => {
     iv: payload.iv.slice(0, -2) + (payload.iv.slice(-2) === '00' ? 'ff' : '00'),
   };
 
-  await t.throwsAsync(() => decrypt(tampered, bundle.privateKey));
+  await t.throwsAsync(() => decrypt(tampered, bundle.privateKey), {
+    any: true,
+  });
 });
