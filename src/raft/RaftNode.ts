@@ -139,6 +139,13 @@ export class RaftNode<T = unknown> {
       this.currentTerm = msgTerm;
       this.votedFor = null;
       this.persistState();
+      // Whoever we thought was the leader (possibly ourselves) is stale in
+      // this newer term. Clear it so callers stop routing requests to the
+      // deposed leader; a valid AppendEntries will set the new leader.
+      if (this.leaderId !== null) {
+        this.leaderId = null;
+        this.emit('leaderChanged', null);
+      }
       this.becomeFollower();
     }
 
