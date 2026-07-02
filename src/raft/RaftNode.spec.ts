@@ -784,6 +784,49 @@ test('leader steps down on receiving higher term', (t) => {
   });
 });
 
+test('deposed leader clears stale leaderId when stepping down on higher term (split-brain reproduction)', (t) => {
+  const log = new InMemoryRaftLog<string>();
+  const a = new RaftNode<string>('A', log, FAST_OPTS);
+  a.sendMessage = () => {};
+  a.start([]);
+
+  return new Promise<void>((resolve) => {
+    setTimeout(() => {
+      t.is(a.isLeader(), true);
+      t.is(a.getLeaderId(), 'A');
+
+      const leaders: Array<string | null> = [];
+      a.on('leaderChanged', (id) => leaders.push(id));
+
+      // A higher-term RequestVote arrives (e.g. a rejoining partition started
+      // an election). There is no leader in this newer term yet, so A must
+      // not keep reporting a leader — otherwise the mesh keeps forwarding
+      // proposals to A itself, which is no longer the leader.
+      a.handleMessage('B', {
+        type: 'RequestVote',
+        term: 2,
+        candidateId: 'B',
+        lastLogIndex: 0,
+        lastLogTerm: 0,
+      });
+
+      t.is(a.getRole(), 'follower');
+      t.is(
+        a.getLeaderId(),
+        null,
+        'stale leaderId must be cleared on step-down'
+      );
+      t.true(
+        leaders.includes(null),
+        'leaderChanged(null) must be emitted so consumers stop routing to the old leader'
+      );
+
+      a.destroy();
+      resolve();
+    }, 100);
+  });
+});
+
 test('candidate steps down on receiving AppendEntries from valid leader', (t) => {
   const { node } = createNode('A', ['B', 'C']);
 
