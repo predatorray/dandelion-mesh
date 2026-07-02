@@ -456,6 +456,136 @@ test('empty bootstrapPeers results in no connect calls', (t) => {
 });
 
 // ---------------------------------------------------------------------------
+// Tests: Split-brain prevention for joining nodes
+// ---------------------------------------------------------------------------
+
+test('joiner with bootstrapPeers does not elect itself before connecting (split-brain reproduction)', async (t) => {
+  const bundle = await generateKeyBundle(2048);
+  const transport = new MockTransport();
+  const mesh = new DandelionMesh<string>(transport, {
+    raft: FAST_RAFT,
+    bootstrapPeers: ['host'],
+    cryptoKeyBundle: bundle,
+  });
+
+  let readyId: string | undefined;
+  mesh.on('ready', (id) => {
+    readyId = id;
+  });
+
+  transport.simulateOpen('joiner');
+  t.is(readyId, 'joiner', 'ready must still fire immediately');
+
+  // WebRTC connection establishment is slow (e.g. TURN negotiation) — much
+  // slower than the election timeout. The joiner must NOT form its own
+  // single-node cluster in the meantime: it would elect itself leader at the
+  // same initial term as the host's cluster, and when the two clusters merge,
+  // conflicting log entries at the same term+index are undetectable — the
+  // logs diverge permanently (split brain).
+  await new Promise((r) => setTimeout(r, 250));
+  t.false(
+    mesh.isLeader,
+    'joiner must not become leader of its own single-node cluster'
+  );
+  t.is(mesh.leaderId, null);
+
+  mesh.close();
+});
+
+test('slow-connecting joiner merges into the host cluster without losing entries (split-brain reproduction)', async (t) => {
+  const bundleHost = await generateKeyBundle(2048);
+  const bundleJoiner = await generateKeyBundle(2048);
+
+  const tHost = new MockTransport();
+  const meshHost = new DandelionMesh<string>(tHost, {
+    raft: FAST_RAFT,
+    cryptoKeyBundle: bundleHost,
+  });
+
+  const tJoiner = new MockTransport();
+  const meshJoiner = new DandelionMesh<string>(tJoiner, {
+    raft: FAST_RAFT,
+    bootstrapPeers: ['host'],
+    cryptoKeyBundle: bundleJoiner,
+  });
+
+  tHost.simulateOpen('host');
+  tJoiner.simulateOpen('joiner');
+
+  // The WebRTC connection takes longer than the election timeout to open.
+  await new Promise((r) => setTimeout(r, 250));
+  t.true(meshHost.isLeader, 'host becomes leader of its cluster');
+
+  // Now the connection finally opens.
+  wirePair('host', tHost, 'joiner', tJoiner);
+  tHost.simulatePeerConnected('joiner');
+  tJoiner.simulatePeerConnected('host');
+
+  await new Promise((r) => setTimeout(r, 600));
+
+  // Exactly one leader, agreed upon by both nodes.
+  const leaders = [meshHost, meshJoiner].filter((m) => m.isLeader);
+  t.is(leaders.length, 1, 'exactly one leader after the merge');
+  t.is(
+    meshHost.leaderId,
+    meshJoiner.leaderId,
+    'both nodes must agree on the leader'
+  );
+
+  // The joiner's public key announcement must be present in the shared log:
+  // if the joiner had formed its own cluster, its key was committed to a
+  // diverged log and the host would wait for it forever.
+  const received: Array<MeshMessage<string>> = [];
+  meshJoiner.on('message', (msg) => received.push(msg));
+
+  const sendResult = await Promise.race([
+    meshHost.sendPrivate('joiner', 'secret'),
+    new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 3000)),
+  ]);
+  t.is(
+    sendResult,
+    true,
+    'sendPrivate must not hang: the joiner key must be in the shared log'
+  );
+
+  await new Promise((r) => setTimeout(r, 300));
+  t.true(
+    received.some((m) => m.type === 'private' && m.data === 'secret'),
+    'joiner should receive the private message'
+  );
+
+  meshHost.close();
+  meshJoiner.close();
+});
+
+test('joiner eventually starts its own cluster if bootstrap peers never connect', async (t) => {
+  const bundle = await generateKeyBundle(2048);
+  const transport = new MockTransport();
+  const mesh = new DandelionMesh<string>(transport, {
+    raft: FAST_RAFT,
+    bootstrapPeers: ['host'],
+    bootstrapElectionTimeoutMs: 100,
+    cryptoKeyBundle: bundle,
+  });
+
+  transport.simulateOpen('joiner');
+
+  // Not a leader while waiting for the bootstrap peers...
+  await new Promise((r) => setTimeout(r, 50));
+  t.false(mesh.isLeader);
+
+  // ...but after the bootstrap election timeout it gives up waiting and
+  // elects itself so a lone node remains functional.
+  await new Promise((r) => setTimeout(r, 400));
+  t.true(
+    mesh.isLeader,
+    'joiner should fall back to its own cluster after the timeout'
+  );
+
+  mesh.close();
+});
+
+// ---------------------------------------------------------------------------
 // Tests: Peer lifecycle events
 // ---------------------------------------------------------------------------
 

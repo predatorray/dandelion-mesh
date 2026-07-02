@@ -10,6 +10,7 @@ import { InMemoryRaftLog } from '../raft/log/InMemoryRaftLog';
 import { RaftLog } from '../raft/log/RaftLog';
 import { LogEntry, RaftMessage } from '../raft/types';
 import { Transport } from '../transport/Transport';
+import { unrefTimer } from '../utils/timers';
 
 import {
   DandelionMeshEvents,
@@ -36,6 +37,12 @@ export interface DandelionMeshOptions {
   raftLog?: RaftLog<MeshLogCommand>;
   /** Known peer IDs to connect to on startup */
   bootstrapPeers?: string[];
+  /**
+   * When `bootstrapPeers` is set, how long (ms) to wait for the first peer
+   * connection before giving up and starting elections as a standalone
+   * cluster (default 30000). See the split-brain notes on {@link DandelionMesh}.
+   */
+  bootstrapElectionTimeoutMs?: number;
   /**
    * Pre-generated crypto key bundle. When provided, the mesh skips key
    * generation and uses these keys directly. Accepts either a resolved
@@ -109,6 +116,9 @@ export class DandelionMesh<T = unknown> {
   private readonly modulusLength: number;
   private readonly raftOptions: RaftNodeOptions;
   private readonly bootstrapPeers: string[];
+  private readonly bootstrapElectionTimeoutMs: number;
+  private raftStarted = false;
+  private bootstrapStartTimer: ReturnType<typeof setTimeout> | null = null;
   private lastAppliedIndex = 0;
 
   private readonly listeners: ListenerMap<T> = {
@@ -127,6 +137,8 @@ export class DandelionMesh<T = unknown> {
       (options?.raftLog as RaftLog<MeshLogCommand<T>>) ??
       new InMemoryRaftLog<MeshLogCommand<T>>();
     this.bootstrapPeers = options?.bootstrapPeers ?? [];
+    this.bootstrapElectionTimeoutMs =
+      options?.bootstrapElectionTimeoutMs ?? 30000;
     this.lastAppliedIndex = this.raftLog.length();
 
     // Use provided key bundle or generate a new one
@@ -240,6 +252,10 @@ export class DandelionMesh<T = unknown> {
 
   /** Shut down the mesh: stop Raft, close transport */
   close(): void {
+    if (this.bootstrapStartTimer !== null) {
+      clearTimeout(this.bootstrapStartTimer);
+      this.bootstrapStartTimer = null;
+    }
     this.raftNode?.destroy();
     this.transport.off('open', this.onTransportOpen);
     this.transport.off('peerConnected', this.onPeerConnected);
@@ -255,10 +271,9 @@ export class DandelionMesh<T = unknown> {
     this.localPeerId = peerId;
 
     // Connect to bootstrap peers
-    for (const bp of this.bootstrapPeers) {
-      if (bp !== peerId) {
-        this.transport.connect(bp);
-      }
+    const bootstrapPeers = this.bootstrapPeers.filter((bp) => bp !== peerId);
+    for (const bp of bootstrapPeers) {
+      this.transport.connect(bp);
     }
 
     // Initialize Raft node
@@ -279,8 +294,29 @@ export class DandelionMesh<T = unknown> {
       this.emit('leaderChanged', leaderId);
     });
 
-    // Start Raft with currently connected peers
-    this.raftNode.start(this.transport.connectedPeers as string[]);
+    if (
+      bootstrapPeers.length === 0 ||
+      this.transport.connectedPeers.length > 0
+    ) {
+      // Cluster founder (or already connected): start Raft right away.
+      this.startRaft();
+    } else {
+      // This node is joining an existing cluster: hold elections off until
+      // we are actually connected. Otherwise, if the WebRTC connection takes
+      // longer than the election timeout, this node elects itself leader of
+      // its own single-node cluster at the same initial term as the cluster
+      // it is about to join — and when the two clusters merge, conflicting
+      // log entries at the same term and index cannot be detected, so the
+      // logs diverge permanently (split brain). Incoming Raft messages are
+      // still handled while waiting. A fallback timer ensures a node whose
+      // bootstrap peers never show up eventually becomes functional on its
+      // own.
+      this.bootstrapStartTimer = setTimeout(() => {
+        this.bootstrapStartTimer = null;
+        this.startRaft();
+      }, this.bootstrapElectionTimeoutMs);
+      unrefTimer(this.bootstrapStartTimer);
+    }
 
     this.emit('ready', peerId);
 
@@ -289,9 +325,24 @@ export class DandelionMesh<T = unknown> {
     this.proposePublicKey();
   };
 
+  private startRaft(): void {
+    if (this.raftStarted || !this.raftNode) return;
+    this.raftStarted = true;
+    if (this.bootstrapStartTimer !== null) {
+      clearTimeout(this.bootstrapStartTimer);
+      this.bootstrapStartTimer = null;
+    }
+    this.raftNode.start(this.transport.connectedPeers as string[]);
+  }
+
   private onPeerConnected = (_remotePeerId: string): void => {
-    // Update Raft cluster membership
-    this.raftNode?.updatePeers(this.transport.connectedPeers as string[]);
+    if (this.raftNode && !this.raftStarted) {
+      // First connection while waiting for bootstrap peers: join the cluster.
+      this.startRaft();
+    } else {
+      // Update Raft cluster membership
+      this.raftNode?.updatePeers(this.transport.connectedPeers as string[]);
+    }
     this.emit('peersChanged', this.peers);
   };
 

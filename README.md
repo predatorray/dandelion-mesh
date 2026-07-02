@@ -86,6 +86,33 @@ const mesh = new DandelionMesh(transport, {
 // allowing a peer to rejoin and catch up from where it left off.
 ```
 
+### Connection resiliency
+
+`PeerJSTransport` automatically retries failed connection attempts with
+exponential backoff and re-establishes established connections that drop
+unexpectedly, so transient network failures do not partition the mesh.
+The behaviour is configurable:
+
+```ts
+const transport = new PeerJSTransport({
+  peerId: 'alice',
+  connectionRetry: {
+    maxRetries: 5,        // retry attempts per peer (0 disables retries)
+    initialDelayMs: 1000, // first backoff delay; doubles per attempt
+    maxDelayMs: 15000,    // backoff ceiling
+    openTimeoutMs: 30000, // fail attempts that never open (0 disables)
+    reconnectOnDrop: true // redial when an established connection drops
+  },
+});
+```
+
+When `bootstrapPeers` is set, the mesh also holds off Raft elections until
+the first peer connection is established (or `bootstrapElectionTimeoutMs`,
+default 30s, elapses). This prevents a joining node whose WebRTC connection
+is slow to open from electing itself leader of its own single-node cluster,
+which would otherwise diverge irreconcilably from the cluster it is about
+to join (split brain).
+
 ### Custom transport
 
 ```ts
