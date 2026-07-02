@@ -3,6 +3,7 @@ import test from 'ava';
 import {
   DataConnectionLike,
   PeerJSTransport,
+  PeerJSTransportOptions,
   PeerLike,
 } from './PeerJSTransport';
 
@@ -111,10 +112,14 @@ class MockPeer implements PeerLike {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function create() {
+function create(options?: PeerJSTransportOptions) {
   const mockPeer = new MockPeer();
-  const transport = new PeerJSTransport(mockPeer);
+  const transport = new PeerJSTransport(mockPeer, options);
   return { mockPeer, transport };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +369,324 @@ test('simultaneous connect: local > remote replaces existing', (t) => {
   t.true(outgoing.closed);
   t.false(incoming.closed);
   t.deepEqual([...transport.connectedPeers], ['A']);
+});
+
+// ---------------------------------------------------------------------------
+// Linked mock connections — a two-ended DataConnection where closing one end
+// asynchronously closes the other end, like a real WebRTC data channel.
+// ---------------------------------------------------------------------------
+
+class LinkedMockConnection implements DataConnectionLike {
+  readonly peer: string;
+  other: LinkedMockConnection | null = null;
+  closed = false;
+  private readonly listeners = new Map<
+    ConnEvent,
+    Array<(...args: any[]) => void>
+  >();
+
+  constructor(remotePeerId: string) {
+    this.peer = remotePeerId;
+  }
+
+  /**
+   * Create a linked pair for a connection between peers `idA` and `idB`.
+   * Returns [endpoint held by A, endpoint held by B].
+   */
+  static pair(
+    idA: string,
+    idB: string
+  ): [LinkedMockConnection, LinkedMockConnection] {
+    const atA = new LinkedMockConnection(idB);
+    const atB = new LinkedMockConnection(idA);
+    atA.other = atB;
+    atB.other = atA;
+    return [atA, atB];
+  }
+
+  send(data: unknown): void {
+    const other = this.other;
+    if (other && !other.closed) {
+      setTimeout(() => other.fire('data', data), 0);
+    }
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.fire('close');
+    const other = this.other;
+    if (other && !other.closed) {
+      setTimeout(() => other.close(), 0);
+    }
+  }
+
+  on(event: ConnEvent, cb: (...args: any[]) => void): void {
+    if (!this.listeners.has(event)) {
+      this.listeners.set(event, []);
+    }
+    this.listeners.get(event)!.push(cb);
+  }
+
+  simulateOpen(): void {
+    this.fire('open');
+  }
+
+  private fire(event: ConnEvent, ...args: unknown[]): void {
+    for (const cb of this.listeners.get(event) ?? []) cb(...args);
+  }
+}
+
+class LinkedPeer implements PeerLike {
+  private readonly listeners = new Map<
+    PeerEvent,
+    Array<(...args: any[]) => void>
+  >();
+  private readonly queued: LinkedMockConnection[] = [];
+  readonly dialed: DataConnectionLike[] = [];
+  destroyed = false;
+
+  queueOutgoing(conn: LinkedMockConnection): void {
+    this.queued.push(conn);
+  }
+
+  on(event: PeerEvent, cb: (...args: any[]) => void): void {
+    if (!this.listeners.has(event)) {
+      this.listeners.set(event, []);
+    }
+    this.listeners.get(event)!.push(cb);
+  }
+
+  connect(peerId: string, _options?: unknown): DataConnectionLike {
+    const conn = this.queued.shift() ?? new LinkedMockConnection(peerId);
+    this.dialed.push(conn);
+    return conn;
+  }
+
+  destroy(): void {
+    this.destroyed = true;
+  }
+
+  simulateOpen(id: string): void {
+    for (const cb of this.listeners.get('open') ?? []) cb(id);
+  }
+
+  simulateIncomingConnection(conn: LinkedMockConnection): void {
+    for (const cb of this.listeners.get('connection') ?? []) cb(conn);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Split brain: simultaneous connect with divergent 'open' ordering
+// ---------------------------------------------------------------------------
+
+test('simultaneous connect with divergent open order keeps both peers connected (split-brain reproduction)', async (t) => {
+  const peerA = new LinkedPeer();
+  const peerZ = new LinkedPeer();
+  const tA = new PeerJSTransport(peerA);
+  const tZ = new PeerJSTransport(peerZ);
+  peerA.simulateOpen('A');
+  peerZ.simulateOpen('Z');
+
+  const disconnectedA: string[] = [];
+  const disconnectedZ: string[] = [];
+  tA.on('peerDisconnected', (id) => disconnectedA.push(id));
+  tZ.on('peerDisconnected', (id) => disconnectedZ.push(id));
+
+  // Connection initiated by A (outgoing at A, incoming at Z)
+  const [abAtA, abAtZ] = LinkedMockConnection.pair('A', 'Z');
+  // Connection initiated by Z (incoming at A, outgoing at Z)
+  const [zaAtA, zaAtZ] = LinkedMockConnection.pair('A', 'Z');
+
+  // Both peers dial each other at the same time.
+  peerA.queueOutgoing(abAtA);
+  peerZ.queueOutgoing(zaAtZ);
+  tA.connect('Z');
+  tZ.connect('A');
+  peerZ.simulateIncomingConnection(abAtZ);
+  peerA.simulateIncomingConnection(zaAtA);
+
+  // The 'open' events race differently on each side: on A the A→Z connection
+  // opens first, while on Z the Z→A connection opens last. With an
+  // arrival-order-dependent tie-break, A keeps A→Z while Z keeps Z→A; each
+  // side then closes the connection the other side kept, disconnecting the
+  // two peers entirely — the mesh partitions and each partition elects its
+  // own Raft leader (split brain).
+  abAtA.simulateOpen();
+  abAtZ.simulateOpen();
+  zaAtA.simulateOpen();
+  zaAtZ.simulateOpen();
+
+  // Let duplicate-close events propagate to the other end.
+  await sleep(50);
+
+  t.deepEqual([...tA.connectedPeers], ['Z'], 'A must remain connected to Z');
+  t.deepEqual([...tZ.connectedPeers], ['A'], 'Z must remain connected to A');
+  t.deepEqual(disconnectedA, [], 'A must not observe a disconnect');
+  t.deepEqual(disconnectedZ, [], 'Z must not observe a disconnect');
+
+  tA.close();
+  tZ.close();
+});
+
+// ---------------------------------------------------------------------------
+// Retry: failed connection attempts must be retried
+// ---------------------------------------------------------------------------
+
+test('connect() can dial again after a failed attempt (no stale pending entry)', (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 0 },
+  });
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  t.is(mockPeer.outgoingConnections.length, 1);
+
+  // The connection attempt fails before it ever opens.
+  mockPeer.outgoingConnections[0]!.simulateError(new Error('peer-unavailable'));
+
+  // A manual reconnect must start a fresh attempt instead of being a no-op
+  // because of a stale pendingConnections entry.
+  transport.connect('remote');
+  t.is(
+    mockPeer.outgoingConnections.length,
+    2,
+    'connect() after a failed attempt should dial again'
+  );
+  transport.close();
+});
+
+test('failed connection attempt is retried automatically with backoff', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 2, initialDelayMs: 10, maxDelayMs: 20 },
+  });
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  t.is(mockPeer.outgoingConnections.length, 1);
+  mockPeer.outgoingConnections[0]!.simulateError(new Error('ICE failed'));
+
+  await sleep(50);
+  t.true(
+    mockPeer.outgoingConnections.length >= 2,
+    'a retry attempt should have been made automatically'
+  );
+
+  // The retry succeeds.
+  mockPeer.outgoingConnections[1]!.simulateOpen();
+  t.deepEqual([...transport.connectedPeers], ['remote']);
+  transport.close();
+});
+
+test('gives up after maxRetries and reports an error', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 1, initialDelayMs: 5, maxDelayMs: 10 },
+  });
+  const errors: Error[] = [];
+  transport.on('error', (err) => errors.push(err));
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  mockPeer.outgoingConnections[0]!.simulateError(new Error('fail-1'));
+  await sleep(30);
+  t.is(mockPeer.outgoingConnections.length, 2, 'one retry should be made');
+  mockPeer.outgoingConnections[1]!.simulateError(new Error('fail-2'));
+  await sleep(30);
+
+  t.is(mockPeer.outgoingConnections.length, 2, 'no attempts beyond maxRetries');
+  t.true(
+    errors.some((e) => /after 1 retr/.test(e.message)),
+    'should report giving up'
+  );
+  transport.close();
+});
+
+test('re-establishes a dropped connection automatically (reconnect on drop)', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 2, initialDelayMs: 5, maxDelayMs: 10 },
+  });
+  const disconnected: string[] = [];
+  const connected: string[] = [];
+  transport.on('peerDisconnected', (id) => disconnected.push(id));
+  transport.on('peerConnected', (id) => connected.push(id));
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  mockPeer.outgoingConnections[0]!.simulateOpen();
+  t.deepEqual(connected, ['remote']);
+
+  // The established connection drops unexpectedly (e.g. transient network).
+  mockPeer.outgoingConnections[0]!.simulateClose();
+  t.deepEqual(disconnected, ['remote']);
+
+  await sleep(40);
+  t.true(
+    mockPeer.outgoingConnections.length >= 2,
+    'a reconnect attempt should have been made automatically'
+  );
+  mockPeer.outgoingConnections[1]!.simulateOpen();
+  t.deepEqual([...transport.connectedPeers], ['remote']);
+  t.deepEqual(connected, ['remote', 'remote']);
+  transport.close();
+});
+
+test('pending connection that never opens times out and is retried', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: {
+      maxRetries: 1,
+      initialDelayMs: 5,
+      maxDelayMs: 10,
+      openTimeoutMs: 20,
+    },
+  });
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  t.is(mockPeer.outgoingConnections.length, 1);
+
+  await sleep(60);
+  t.true(
+    mockPeer.outgoingConnections[0]!.closed,
+    'the stuck pending connection should be closed'
+  );
+  t.true(
+    mockPeer.outgoingConnections.length >= 2,
+    'a new attempt should be made after the open timeout'
+  );
+  transport.close();
+});
+
+test('no retries are attempted after close()', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 3, initialDelayMs: 5, maxDelayMs: 10 },
+  });
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  mockPeer.outgoingConnections[0]!.simulateError(new Error('fail'));
+  transport.close();
+
+  await sleep(40);
+  t.is(mockPeer.outgoingConnections.length, 1, 'no retry after close()');
+});
+
+test('failed incoming connection does not trigger outgoing retries', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 3, initialDelayMs: 5, maxDelayMs: 10 },
+  });
+  mockPeer.simulateOpen('local');
+
+  const incoming = new MockDataConnection('remote');
+  mockPeer.simulateIncomingConnection(incoming);
+  incoming.simulateError(new Error('fail'));
+
+  await sleep(40);
+  t.is(
+    mockPeer.outgoingConnections.length,
+    0,
+    'the remote initiator is responsible for retrying'
+  );
+  transport.close();
 });
 
 test('close of a replaced connection does not emit peerDisconnected', (t) => {
