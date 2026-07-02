@@ -7,6 +7,7 @@ export {
 export {
   PeerJSTransport,
   PeerJSTransportOptions,
+  ConnectionRetryOptions,
   PeerLike,
   DataConnectionLike,
 } from './transport/PeerJSTransport';
