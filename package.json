@@ -1,6 +1,6 @@
 {
   "name": "dandelion-mesh",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Serverless mesh network for browsers using WebRTC. Connect, broadcast, and sync state without a central server.",
   "main": "build/main/index.js",
   "typings": "build/main/index.d.ts",
