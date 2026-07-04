@@ -689,6 +689,168 @@ test('failed incoming connection does not trigger outgoing retries', async (t) =
   transport.close();
 });
 
+test('connect() after close() is a no-op', (t) => {
+  const { mockPeer, transport } = create();
+  mockPeer.simulateOpen('local');
+
+  transport.close();
+  transport.connect('remote');
+  t.is(mockPeer.outgoingConnections.length, 0);
+});
+
+test('a pending incoming connection does not block an outgoing dial', (t) => {
+  const { mockPeer, transport } = create();
+  mockPeer.simulateOpen('local');
+
+  // An incoming connection is pending (not yet open)...
+  const incoming = new MockDataConnection('remote');
+  mockPeer.simulateIncomingConnection(incoming);
+
+  // ...which must not prevent us from dialing out.
+  transport.connect('remote');
+  t.is(mockPeer.outgoingConnections.length, 1);
+  transport.close();
+});
+
+test('duplicate open events on the same connection are ignored', (t) => {
+  const { mockPeer, transport } = create();
+  const connected: string[] = [];
+  transport.on('peerConnected', (id) => connected.push(id));
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  const conn = mockPeer.outgoingConnections[0]!;
+  conn.simulateOpen();
+  conn.simulateOpen();
+
+  t.deepEqual(connected, ['remote']);
+  t.deepEqual([...transport.connectedPeers], ['remote']);
+  transport.close();
+});
+
+test('pending connection closed before opening is retried', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 1, initialDelayMs: 5, maxDelayMs: 10 },
+  });
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  // The connection closes without ever opening (and without an error event).
+  mockPeer.outgoingConnections[0]!.simulateClose();
+
+  await sleep(30);
+  t.true(
+    mockPeer.outgoingConnections.length >= 2,
+    'a retry attempt should have been made'
+  );
+  transport.close();
+});
+
+test('remote redial replaces the previous incoming connection', (t) => {
+  const { mockPeer, transport } = create();
+  const disconnected: string[] = [];
+  transport.on('peerDisconnected', (id) => disconnected.push(id));
+  mockPeer.simulateOpen('local');
+
+  const first = new MockDataConnection('remote');
+  mockPeer.simulateIncomingConnection(first);
+  first.simulateOpen();
+  t.deepEqual([...transport.connectedPeers], ['remote']);
+
+  // The remote reconnects (e.g. after a silent drop on its side): the new
+  // incoming connection supersedes the stale one.
+  const second = new MockDataConnection('remote');
+  mockPeer.simulateIncomingConnection(second);
+  second.simulateOpen();
+
+  t.true(first.closed, 'stale connection should be closed');
+  t.false(second.closed);
+  t.deepEqual([...transport.connectedPeers], ['remote']);
+  t.deepEqual(disconnected, [], 'replacement should not emit peerDisconnected');
+  transport.close();
+});
+
+test('error followed by close on the same attempt is handled once', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: {
+      maxRetries: 1,
+      initialDelayMs: 10000,
+      openTimeoutMs: 0,
+    },
+  });
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  const conn = mockPeer.outgoingConnections[0]!;
+  conn.simulateError(new Error('fail'));
+  conn.simulateClose(); // PeerJS may fire both; must not double-schedule
+
+  await sleep(30);
+  // The single scheduled retry has a long delay, so no new dial yet, and the
+  // duplicate failure must not have consumed a second retry attempt.
+  t.is(mockPeer.outgoingConnections.length, 1);
+  transport.close();
+});
+
+test('failed attempt is not retried when the peer is already connected', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 3, initialDelayMs: 5, maxDelayMs: 10 },
+  });
+  mockPeer.simulateOpen('local');
+
+  // We dial out, but before our attempt opens, the remote's incoming
+  // connection opens and becomes the active connection.
+  transport.connect('remote');
+  const incoming = new MockDataConnection('remote');
+  mockPeer.simulateIncomingConnection(incoming);
+  incoming.simulateOpen();
+  t.deepEqual([...transport.connectedPeers], ['remote']);
+
+  // Our own attempt then fails — no retry is needed.
+  mockPeer.outgoingConnections[0]!.simulateError(new Error('fail'));
+  await sleep(30);
+  t.is(mockPeer.outgoingConnections.length, 1, 'no retry when connected');
+  t.deepEqual([...transport.connectedPeers], ['remote']);
+  transport.close();
+});
+
+test('connect() cancels a scheduled retry and dials immediately', async (t) => {
+  const { mockPeer, transport } = create({
+    connectionRetry: { maxRetries: 3, initialDelayMs: 10000 },
+  });
+  mockPeer.simulateOpen('local');
+
+  transport.connect('remote');
+  mockPeer.outgoingConnections[0]!.simulateError(new Error('fail'));
+  // A retry is now scheduled far in the future; a manual connect() should
+  // cancel it and dial right away.
+  transport.connect('remote');
+  t.is(mockPeer.outgoingConnections.length, 2);
+
+  await sleep(30);
+  t.is(mockPeer.outgoingConnections.length, 2, 'no duplicate dial from timer');
+  transport.close();
+});
+
+test('scheduleRetry does not double-schedule and is a no-op after close', (t) => {
+  const { transport } = create({
+    connectionRetry: { maxRetries: 3, initialDelayMs: 10000 },
+  });
+  const internal = transport as unknown as {
+    scheduleRetry(remotePeerId: string): void;
+    retryTimers: Map<string, unknown>;
+  };
+
+  internal.scheduleRetry('remote');
+  internal.scheduleRetry('remote'); // already scheduled — must be a no-op
+  t.is(internal.retryTimers.size, 1);
+
+  transport.close();
+  t.is(internal.retryTimers.size, 0);
+  internal.scheduleRetry('remote'); // closed — must be a no-op
+  t.is(internal.retryTimers.size, 0);
+});
+
 test('close of a replaced connection does not emit peerDisconnected', (t) => {
   const { mockPeer, transport } = create();
   const disconnected: string[] = [];

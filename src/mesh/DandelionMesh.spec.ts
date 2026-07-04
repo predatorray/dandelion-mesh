@@ -585,6 +585,79 @@ test('joiner eventually starts its own cluster if bootstrap peers never connect'
   mesh.close();
 });
 
+test('late peer connection after the bootstrap fallback updates membership', async (t) => {
+  const bundle = await generateKeyBundle(2048);
+  const transport = new MockTransport();
+  const mesh = new DandelionMesh<string>(transport, {
+    raft: FAST_RAFT,
+    bootstrapPeers: ['host'],
+    bootstrapElectionTimeoutMs: 50,
+    cryptoKeyBundle: bundle,
+  });
+
+  transport.simulateOpen('joiner');
+  await new Promise((r) => setTimeout(r, 300));
+  t.true(mesh.isLeader, 'fallback should have started a standalone cluster');
+
+  // A peer connecting after Raft has already started goes through the
+  // regular membership-update path (not a second Raft start).
+  transport.simulatePeerConnected('late-peer');
+  t.deepEqual(mesh.peers, ['joiner', 'late-peer']);
+  t.true(mesh.isLeader);
+
+  mesh.close();
+});
+
+test('sendPrivate returns false when the leader was deposed and none is elected yet', async (t) => {
+  const bundle = await generateKeyBundle(2048);
+  const { transport, mesh } = createMesh('alice', { cryptoKeyBundle: bundle });
+
+  // Leader bob commits its public key announcement so alice knows bob's key.
+  const bobBundle = await generateKeyBundle(2048);
+  transport.simulateMessage('bob', {
+    channel: 'raft',
+    payload: {
+      type: 'AppendEntries',
+      term: 1,
+      leaderId: 'bob',
+      prevLogIndex: 0,
+      prevLogTerm: 0,
+      entries: [
+        {
+          term: 1,
+          command: {
+            _meshType: 'publicKey',
+            peerId: 'bob',
+            jwk: bobBundle.publicKeyJwk,
+          },
+        },
+      ],
+      leaderCommit: 1,
+    },
+  } as WireMessage);
+  t.is(mesh.leaderId, 'bob');
+
+  // A higher-term election starts: the old leader is deposed and no new
+  // leader is known yet.
+  transport.simulateMessage('carol', {
+    channel: 'raft',
+    payload: {
+      type: 'RequestVote',
+      term: 2,
+      candidateId: 'carol',
+      lastLogIndex: 1,
+      lastLogTerm: 1,
+    },
+  } as WireMessage);
+  t.is(mesh.leaderId, null);
+
+  // With the recipient key known but no leader to route through, sendPrivate
+  // must fail fast instead of forwarding to the deposed leader.
+  const result = await mesh.sendPrivate('bob', 'secret');
+  t.false(result);
+  mesh.close();
+});
+
 // ---------------------------------------------------------------------------
 // Tests: Peer lifecycle events
 // ---------------------------------------------------------------------------
