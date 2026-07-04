@@ -987,6 +987,119 @@ test('heartbeat resets election timer without adding entries', (t) => {
 });
 
 // ---------------------------------------------------------------------------
+// Stale / misdirected RPC results are ignored
+// ---------------------------------------------------------------------------
+
+test('off removes a registered event listener', (t) => {
+  const { node } = createNode('A', ['B']);
+  const leaders: Array<string | null> = [];
+  const listener = (id: string | null) => leaders.push(id);
+  node.on('leaderChanged', listener);
+  node.off('leaderChanged', listener);
+
+  node.handleMessage('B', {
+    type: 'AppendEntries',
+    term: 1,
+    leaderId: 'B',
+    prevLogIndex: 0,
+    prevLogTerm: 0,
+    entries: [],
+    leaderCommit: 0,
+  } as AppendEntriesArgs<string>);
+
+  t.deepEqual(leaders, []);
+  node.destroy();
+});
+
+test('follower ignores RequestVoteResult and AppendEntriesResult', (t) => {
+  const { node, sent } = createNode('A', ['B']);
+
+  node.handleMessage('B', {
+    type: 'RequestVoteResult',
+    term: 0,
+    voteGranted: true,
+  });
+  node.handleMessage('B', {
+    type: 'AppendEntriesResult',
+    term: 0,
+    success: true,
+    responderId: 'B',
+    matchIndex: 5,
+  });
+
+  t.is(node.getRole(), 'follower');
+  t.is(sent.length, 0);
+  node.destroy();
+});
+
+test('candidate ignores RequestVoteResult from an older term', async (t) => {
+  const log = new InMemoryRaftLog<string>();
+  const node = new RaftNode<string>('A', log, FAST_OPTS);
+  node.sendMessage = () => {}; // peer B never answers
+  node.start(['B']);
+
+  // Let at least two elections time out so currentTerm >= 2
+  await new Promise((r) => setTimeout(r, 200));
+  t.is(node.getRole(), 'candidate');
+  t.true(node.getCurrentTerm() >= 2);
+
+  // A vote grant from a previous term must not count
+  node.handleMessage('B', {
+    type: 'RequestVoteResult',
+    term: 1,
+    voteGranted: true,
+  });
+  t.is(node.getRole(), 'candidate');
+
+  node.destroy();
+});
+
+test('leader ignores AppendEntriesResult from an older term', async (t) => {
+  const log = new InMemoryRaftLog<string>();
+  const node = new RaftNode<string>('L', log, FAST_OPTS);
+  node.sendMessage = () => {};
+  node.start([]);
+
+  await new Promise((r) => setTimeout(r, 100));
+  t.true(node.isLeader());
+  node.updatePeers(['F']);
+
+  node.handleMessage('F', {
+    type: 'AppendEntriesResult',
+    term: 0, // stale
+    success: true,
+    responderId: 'F',
+    matchIndex: 99,
+  });
+
+  // The stale result must not advance commitIndex
+  t.is(node.getCommitIndex(), 0);
+  node.destroy();
+});
+
+test('leader does not commit entries from an older term by counting replicas', async (t) => {
+  // Pre-populate the log with an entry from an older term
+  const log = new InMemoryRaftLog<string>();
+  log.append([{ term: 0, command: 'old-term-entry' }]);
+
+  const node = new RaftNode<string>('L', log, FAST_OPTS);
+  node.sendMessage = () => {};
+  node.start([]);
+
+  await new Promise((r) => setTimeout(r, 100));
+  t.true(node.isLeader());
+
+  // With a second peer the majority is 2, so the new entry cannot commit,
+  // and the old-term entry at index 1 must be skipped (Raft §5.4.2), not
+  // committed just because a majority stores it.
+  node.updatePeers(['F']);
+  node.propose('new-entry');
+
+  t.is(node.getCommitIndex(), 0);
+  node.destroy();
+});
+
+// ---------------------------------------------------------------------------
 // Destroy
 // ---------------------------------------------------------------------------
 
